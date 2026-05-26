@@ -1,3 +1,5 @@
+![Quacklake](images/quacklake-compressed.png)
+
 # quacklake
 
 `quacklake` is a Cloudflare Workers / Durable Objects service that speaks DuckDB's experimental Quack HTTP protocol and stores DuckLake catalog metadata in Durable Object SQLite storage.
