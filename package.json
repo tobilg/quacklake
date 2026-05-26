@@ -1,0 +1,33 @@
+{
+  "name": "quacklake",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "wrangler deploy --config wrangler.example.jsonc --dry-run --outdir dist",
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "file-list-sidecar": "node scripts/local-file-list-sidecar.mjs",
+    "smoke:ducklake": "bash scripts/test-ducklake-smoke.sh",
+    "smoke:ducklake:r2": "bash scripts/test-ducklake-r2-smoke.sh",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit",
+    "types": "wrangler types"
+  },
+  "dependencies": {
+    "@polyglot-sql/sdk": "^0.4.1",
+    "@quack-protocol/sdk": "^0.2.0",
+    "jose": "^6.2.3"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.16.6",
+    "@cloudflare/workers-types": "4.20260515.1",
+    "@types/node": "^24.0.0",
+    "@vitest/coverage-istanbul": "^4.1.6",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.14",
+    "vitest": "^4.1.6",
+    "wrangler": "^4.42.0"
+  }
+}

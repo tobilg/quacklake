@@ -1,0 +1,775 @@
+# Microsoft Entra ID End-To-End Guide
+
+This guide shows how to use Microsoft Entra ID as an OIDC provider for quacklake, how Entra groups and scopes become quacklake principals, how catalog mappings select a DuckLake catalog, how catalog policies create permission profiles, and how end users query data published through the DuckLake catalog.
+
+The examples use one catalog named `finance`, one Entra tenant, one Entra app registration that represents the quacklake API, and Entra access tokens. quacklake verifies the token, maps token claims into an `AuthPrincipal`, resolves the token to exactly one catalog, and evaluates the catalog policy before executing catalog SQL through the Quack catalog.
+
+## What Gets Enforced
+
+There are three separate layers:
+
+| Layer | Configured in | Purpose |
+| --- | --- | --- |
+| Provider trust | `/admin/oidc/providers` | Verifies Entra token issuer, audience, algorithm, signature, and expiry. |
+| Catalog mapping | `/admin/catalogs/:catalogId/auth-mapping` | Decides whether a verified Entra principal may select this quacklake catalog. |
+| Catalog policy | `/admin/catalogs/:catalogId/auth-policy` | Decides which SQL actions and resources that principal may use inside the selected catalog. |
+
+Entra ID does not directly grant table access. It emits identity facts such as `oid`, `tid`, `scp`, `groups`, and `roles`. quacklake maps those facts into one normalized principal and evaluates server-side catalog policy rules.
+
+Important limits for v1:
+
+- Each catalog has one active policy document. Multiple permission profiles are multiple rules in that one document.
+- Catalog mapping must resolve an OIDC token to exactly one catalog. Zero matches or matches across multiple catalogs deny authentication.
+- Entra `groups` claims usually contain group object IDs, not display names.
+- If a user is in too many groups, Entra can emit group overage claims instead of the full `groups` array. quacklake v1 does not call Microsoft Graph to expand group overage claims.
+- Column policies are enforced at quacklake's SQL authorization layer.
+- `rowPredicate` is currently a catalog-side authorization guard that requires referenced claims to be present. It is not a complete data-file gateway or storage-level row filter.
+- DuckDB still needs object-storage credentials to read DuckLake data files. Scope those R2/S3 credentials separately because broad storage credentials can bypass catalog decisions.
+
+## Token Choice
+
+Use Entra access tokens for this guide.
+
+For a quacklake API app registration, end-user clients request an access token for an exposed API scope such as:
+
+```text
+api://<quacklake-api-app-id>/Catalog.Access
+```
+
+With v2 Entra access tokens, the `aud` claim is the client ID of the API app registration. Configure the quacklake provider `audiences` to that API app ID unless your tenant intentionally issues a different audience.
+
+Do not use an ID token for the normal DuckDB/Quack path unless you deliberately configure quacklake to trust the client application's ID-token audience. ID tokens identify sign-in to the client app; access tokens identify calls to the quacklake API.
+
+## Example Permission Profiles
+
+This guide uses Entra security groups as permission profiles:
+
+| Entra group display name | quacklake profile | Intended access |
+| --- | --- | --- |
+| `dq-finance-readers` | Reader | Read a safe column set from published finance tables. No writes. |
+| `dq-finance-analysts` | Analyst | Read a broader column set, including analytics fields. No writes. |
+| `dq-finance-tenant-users` | Tenant user | Read tenant-scoped columns when `tid` is present and rows store Entra tenant IDs. |
+| `dq-finance-writers` | Writer | Read and mutate rows in finance tables. No schema drops. |
+| `dq-finance-admins` | Catalog admin | Manage schemas, tables, columns, and DuckLake metadata maintenance. |
+
+The actual policy examples use group object IDs:
+
+```text
+READERS_GROUP_ID=<object-id-of-dq-finance-readers>
+ANALYSTS_GROUP_ID=<object-id-of-dq-finance-analysts>
+TENANT_USERS_GROUP_ID=<object-id-of-dq-finance-tenant-users>
+WRITERS_GROUP_ID=<object-id-of-dq-finance-writers>
+ADMINS_GROUP_ID=<object-id-of-dq-finance-admins>
+```
+
+Entra group display names are operational labels. quacklake matches the `groups` claim values exactly, so use object IDs when Entra emits object IDs.
+
+## Prerequisites
+
+You need:
+
+- A deployed quacklake Worker.
+- Worker secrets set for `ADMIN_TOKEN`, `QUACKLAKE_JWT_SECRET`, and `CONNECTION_SIGNING_SECRET`.
+- Azure CLI authenticated to the target tenant.
+- Permission in Entra ID to create app registrations, create groups, assign users to groups, and configure token claims.
+- DuckDB with DuckLake and Quack extension support.
+- R2 or S3 credentials for the DuckLake data path, scoped to the published bucket and prefix.
+
+Set common shell variables:
+
+```sh
+export WORKER_URL="https://<worker-host>"
+export ADMIN_TOKEN="<quacklake-admin-token>"
+export CATALOG_ID="finance"
+export TENANT_ID="$(az account show --query tenantId -o tsv)"
+```
+
+## 1. Create The quacklake Catalog
+
+Create the catalog and a first-party admin credential for bootstrap:
+
+```sh
+scripts/create-jwt.sh \
+  --worker-url "$WORKER_URL" \
+  --admin-token "$ADMIN_TOKEN" \
+  --catalog-id "$CATALOG_ID" \
+  --output-file /tmp/quacklake-finance-admin.json
+```
+
+The generated first-party JWT is only needed for catalog bootstrap and maintenance. Entra end users will use Entra-issued access tokens.
+
+## 2. Register The quacklake API In Entra ID
+
+Create an app registration that represents the quacklake API:
+
+```sh
+API_APP_ID="$(
+  az ad app create \
+    --display-name quacklake-finance-api \
+    --sign-in-audience AzureADMyOrg \
+    --query appId \
+    -o tsv
+)"
+
+API_APP_OBJECT_ID="$(
+  az ad app show \
+    --id "$API_APP_ID" \
+    --query id \
+    -o tsv
+)"
+
+API_APP_URI="api://$API_APP_ID"
+```
+
+Set the Application ID URI and ask Entra to include security group claims in tokens issued to this API:
+
+```sh
+az ad app update \
+  --id "$API_APP_ID" \
+  --identifier-uris "$API_APP_URI" \
+  --set groupMembershipClaims=SecurityGroup
+```
+
+Expose a delegated API scope named `Catalog.Access`.
+
+The portal path is:
+
+1. Microsoft Entra admin center.
+2. App registrations.
+3. `quacklake-finance-api`.
+4. Expose an API.
+5. Add a scope named `Catalog.Access`.
+6. Allow admins and users, or admins only, depending on your tenant policy.
+
+For production, use your normal infrastructure-as-code flow for app registrations and scopes. The essential quacklake values are:
+
+```sh
+echo "Tenant issuer: https://login.microsoftonline.com/$TENANT_ID/v2.0"
+echo "JWKS URI: https://login.microsoftonline.com/$TENANT_ID/discovery/v2.0/keys"
+echo "Audience: $API_APP_ID"
+echo "Scope: Catalog.Access"
+```
+
+## 3. Create Entra Groups
+
+Create security groups for the permission profiles:
+
+```sh
+READERS_GROUP_ID="$(
+  az ad group create \
+    --display-name dq-finance-readers \
+    --mail-nickname dq-finance-readers \
+    --query id \
+    -o tsv
+)"
+
+ANALYSTS_GROUP_ID="$(
+  az ad group create \
+    --display-name dq-finance-analysts \
+    --mail-nickname dq-finance-analysts \
+    --query id \
+    -o tsv
+)"
+
+TENANT_USERS_GROUP_ID="$(
+  az ad group create \
+    --display-name dq-finance-tenant-users \
+    --mail-nickname dq-finance-tenant-users \
+    --query id \
+    -o tsv
+)"
+
+WRITERS_GROUP_ID="$(
+  az ad group create \
+    --display-name dq-finance-writers \
+    --mail-nickname dq-finance-writers \
+    --query id \
+    -o tsv
+)"
+
+ADMINS_GROUP_ID="$(
+  az ad group create \
+    --display-name dq-finance-admins \
+    --mail-nickname dq-finance-admins \
+    --query id \
+    -o tsv
+)"
+```
+
+If the groups already exist, read their object IDs instead:
+
+```sh
+READERS_GROUP_ID="$(az ad group show --group dq-finance-readers --query id -o tsv)"
+ANALYSTS_GROUP_ID="$(az ad group show --group dq-finance-analysts --query id -o tsv)"
+TENANT_USERS_GROUP_ID="$(az ad group show --group dq-finance-tenant-users --query id -o tsv)"
+WRITERS_GROUP_ID="$(az ad group show --group dq-finance-writers --query id -o tsv)"
+ADMINS_GROUP_ID="$(az ad group show --group dq-finance-admins --query id -o tsv)"
+```
+
+## 4. Assign Users To Profiles
+
+Find a user's Entra object ID:
+
+```sh
+READER_USER_ID="$(az ad user show --id reader@example.com --query id -o tsv)"
+TENANT_USER_ID="$(az ad user show --id tenant-a@example.com --query id -o tsv)"
+ADMIN_USER_ID="$(az ad user show --id admin@example.com --query id -o tsv)"
+```
+
+Assign users to groups:
+
+```sh
+az ad group member add \
+  --group "$READERS_GROUP_ID" \
+  --member-id "$READER_USER_ID"
+
+az ad group member add \
+  --group "$TENANT_USERS_GROUP_ID" \
+  --member-id "$TENANT_USER_ID"
+
+az ad group member add \
+  --group "$ADMINS_GROUP_ID" \
+  --member-id "$ADMIN_USER_ID"
+```
+
+Group changes are reflected only in newly-issued tokens. Ask users to sign in again or refresh their token after changing membership.
+
+## 5. Register Entra ID With quacklake
+
+Create the provider document:
+
+```sh
+cat >/tmp/entra-finance-provider.json <<JSON
+{
+  "providerId": "entra-finance",
+  "issuer": "https://login.microsoftonline.com/$TENANT_ID/v2.0",
+  "jwksUri": "https://login.microsoftonline.com/$TENANT_ID/discovery/v2.0/keys",
+  "audiences": ["$API_APP_ID"],
+  "algorithms": ["RS256"],
+  "clockToleranceSeconds": 60,
+  "claimMapping": {
+    "subject": "oid",
+    "scopes": "scp",
+    "groups": "groups",
+    "roles": "roles",
+    "tenantId": "tid"
+  }
+}
+JSON
+```
+
+Install it:
+
+```sh
+curl -s -X POST "$WORKER_URL/admin/oidc/providers" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d @/tmp/entra-finance-provider.json
+```
+
+For updates, use:
+
+```sh
+curl -s -X PUT "$WORKER_URL/admin/oidc/providers/entra-finance" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d @/tmp/entra-finance-provider.json
+```
+
+After token verification, quacklake normalizes a matching Entra token into a principal like:
+
+```json
+{
+  "principal": {
+    "issuer": "https://login.microsoftonline.com/<tenant-id>/v2.0",
+    "subject": "<user-object-id>",
+    "audience": ["<api-app-id>"],
+    "scopes": ["Catalog.Access"],
+    "groups": ["<group-object-id>"],
+    "roles": [],
+    "claims": {
+      "tenantId": "<tenant-id>"
+    },
+    "providerId": "entra-finance",
+    "authMode": "oidc_jwt"
+  }
+}
+```
+
+## 6. Replace The Catalog Mapping
+
+Catalog mapping answers only one question: can this verified Entra principal select the `finance` catalog?
+
+Require both:
+
+- An access token issued for the quacklake API scope.
+- Membership in at least one finance profile group.
+
+```sh
+cat >/tmp/finance-entra-auth-mapping.json <<JSON
+{
+  "mappings": [
+    {
+      "mappingId": "entra-finance-profiles",
+      "providerId": "entra-finance",
+      "priority": 100,
+      "match": {
+        "scopesAny": ["Catalog.Access"],
+        "groupsAny": [
+          "$READERS_GROUP_ID",
+          "$ANALYSTS_GROUP_ID",
+          "$TENANT_USERS_GROUP_ID",
+          "$WRITERS_GROUP_ID",
+          "$ADMINS_GROUP_ID"
+        ]
+      }
+    }
+  ]
+}
+JSON
+```
+
+Install it:
+
+```sh
+curl -s -X PUT "$WORKER_URL/admin/catalogs/$CATALOG_ID/auth-mapping" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d @/tmp/finance-entra-auth-mapping.json
+```
+
+Why this matters:
+
+- If the token has no `Catalog.Access` scope, it does not select this catalog.
+- If the token has none of the configured group IDs, it does not select this catalog.
+- If the same token maps to another catalog too, authentication is denied as ambiguous.
+- `priority` is metadata in v1. It does not break ties.
+- This mapping does not grant read or write access. It only routes the token to the catalog.
+
+For tenant-specific catalogs, make mapping rules mutually exclusive by group or tenant claim:
+
+```json
+{
+  "mappingId": "entra-tenant-a-finance",
+  "providerId": "entra-finance",
+  "match": {
+    "scopesAny": ["Catalog.Access"],
+    "groupsAny": ["<tenant-a-finance-group-object-id>"],
+    "claims": {
+      "tenantId": "<entra-tenant-guid>"
+    }
+  }
+}
+```
+
+Use that pattern only when each tenant has a separate quacklake catalog. For one shared catalog, keep catalog mapping broad and enforce profile restrictions in the catalog policy.
+
+## 7. Install Permission Profiles
+
+Write a policy document with multiple profile rules:
+
+```sh
+cat >/tmp/finance-entra-auth-policy.json <<JSON
+{
+  "version": 1,
+  "defaultEffect": "deny",
+  "rules": [
+    {
+      "ruleId": "entra-finance-readers-safe-columns",
+      "effect": "allow",
+      "principal": {
+        "scopesAny": ["Catalog.Access"],
+        "groupsAny": ["$READERS_GROUP_ID"]
+      },
+      "actions": ["schema.read", "table.read", "column.read"],
+      "resource": {
+        "schema": "finance",
+        "table": "*",
+        "columns": ["id", "tenant_id", "amount", "created_at"]
+      }
+    },
+    {
+      "ruleId": "entra-finance-analysts-expanded-columns",
+      "effect": "allow",
+      "principal": {
+        "scopesAny": ["Catalog.Access"],
+        "groupsAny": ["$ANALYSTS_GROUP_ID"]
+      },
+      "actions": ["schema.read", "table.read", "column.read"],
+      "resource": {
+        "schema": "finance",
+        "table": "*",
+        "columns": ["id", "tenant_id", "customer_id", "amount", "status", "created_at", "updated_at"]
+      }
+    },
+    {
+      "ruleId": "entra-finance-tenant-users",
+      "effect": "allow",
+      "principal": {
+        "scopesAny": ["Catalog.Access"],
+        "groupsAny": ["$TENANT_USERS_GROUP_ID"]
+      },
+      "actions": ["schema.read", "table.read", "column.read"],
+      "resource": {
+        "schema": "finance",
+        "table": "invoices",
+        "columns": ["id", "tenant_id", "amount", "status", "created_at"]
+      },
+      "rowPredicate": "tenant_id = \${claims.tenantId}"
+    },
+    {
+      "ruleId": "entra-finance-writers-table-crud",
+      "effect": "allow",
+      "principal": {
+        "scopesAny": ["Catalog.Access"],
+        "groupsAny": ["$WRITERS_GROUP_ID"]
+      },
+      "actions": [
+        "schema.read",
+        "table.read",
+        "table.insert",
+        "table.update",
+        "table.delete",
+        "column.read"
+      ],
+      "resource": {
+        "schema": "finance",
+        "table": "*",
+        "column": "*"
+      }
+    },
+    {
+      "ruleId": "entra-finance-admins-catalog-admin",
+      "effect": "allow",
+      "principal": {
+        "scopesAny": ["Catalog.Access"],
+        "groupsAny": ["$ADMINS_GROUP_ID"]
+      },
+      "actions": [
+        "schema.read",
+        "schema.create",
+        "schema.drop",
+        "table.read",
+        "table.create",
+        "table.insert",
+        "table.update",
+        "table.delete",
+        "table.drop",
+        "column.read",
+        "column.alter",
+        "catalog.admin"
+      ],
+      "resource": {
+        "schema": "*",
+        "table": "*",
+        "column": "*"
+      }
+    },
+    {
+      "ruleId": "deny-entra-reader-secret-columns",
+      "effect": "deny",
+      "principal": {
+        "groupsAny": ["$READERS_GROUP_ID", "$ANALYSTS_GROUP_ID", "$TENANT_USERS_GROUP_ID"]
+      },
+      "actions": ["column.read"],
+      "resource": {
+        "schema": "finance",
+        "table": "employees",
+        "columns": ["salary", "ssn"]
+      }
+    }
+  ]
+}
+JSON
+```
+
+Install it:
+
+```sh
+curl -s -X PUT "$WORKER_URL/admin/catalogs/$CATALOG_ID/auth-policy" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d @/tmp/finance-entra-auth-policy.json
+```
+
+How evaluation works:
+
+- `defaultEffect: "deny"` denies anything that no allow rule covers.
+- Deny rules override allow rules.
+- A rule must match principal, action, and resource.
+- `scopesAny: ["Catalog.Access"]` requires the Entra access token to include the delegated API scope.
+- `groupsAny` matches any Entra group object ID in `principal.groups`.
+- `groupsAll` can require a user to be in multiple groups.
+- `claims` can require exact normalized claim values, for example `{ "tenantId": "<tenant-guid>" }`.
+- `columns` allows only listed projected columns. `SELECT *` requires `column.read` on `*`, so it is denied unless the rule grants `column: "*"` or `columns: ["*"]`.
+- `rowPredicate` only matches when referenced claims are present. In this example, `tenantId` maps to Entra `tid`, so table rows must store that Entra tenant GUID for the predicate to be meaningful.
+- For hard row isolation in v1, combine catalog policy with tenant-specific data layout, scoped storage credentials, separate catalogs, or published views/materialized subsets.
+
+## 8. Validate With Explain
+
+Get an Entra access token. For a local smoke test, Azure CLI can request a token for the exposed scope when tenant consent and client permissions allow it:
+
+```sh
+ENTRA_TOKEN="$(
+  az account get-access-token \
+    --tenant "$TENANT_ID" \
+    --scope "$API_APP_URI/Catalog.Access" \
+    --query accessToken \
+    -o tsv
+)"
+```
+
+If Azure CLI is not authorized to request that scope in your tenant, use your normal application sign-in flow to acquire an access token for:
+
+```text
+api://<quacklake-api-app-id>/Catalog.Access
+```
+
+Ask quacklake to explain the decision:
+
+```sh
+curl -s -X POST "$WORKER_URL/admin/authz/explain" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"authString\": \"$ENTRA_TOKEN\",
+    \"catalogId\": \"$CATALOG_ID\",
+    \"sql\": \"SELECT id, tenant_id, amount, created_at FROM finance.invoices LIMIT 10\"
+  }"
+```
+
+Expected success indicators:
+
+- `principal.authMode` is `oidc_jwt`.
+- `principal.providerId` is `entra-finance`.
+- `principal.scopes` contains `Catalog.Access`.
+- `principal.groups` contains the expected group object ID.
+- `catalog.catalogId` is `finance`.
+- `decision.allowed` is `true`.
+- `matchedRules` includes a rule such as `entra-finance-readers-safe-columns`.
+
+Try a denied query:
+
+```sh
+curl -s -X POST "$WORKER_URL/admin/authz/explain" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"authString\": \"$ENTRA_TOKEN\",
+    \"catalogId\": \"$CATALOG_ID\",
+    \"sql\": \"SELECT * FROM finance.invoices\"
+  }"
+```
+
+A reader is expected to be denied because `SELECT *` requires wildcard column access.
+
+## 9. End User DuckDB Setup
+
+End users need two secrets:
+
+- A Quack secret with their Entra access token.
+- A storage secret for DuckLake data files.
+
+Create the Quack secret:
+
+```sql
+CREATE OR REPLACE SECRET quacklake_finance (
+  TYPE quack,
+  TOKEN '<entra-access-token>',
+  SCOPE 'quack:<worker-host>:443'
+);
+```
+
+Create a scoped R2 storage secret. Use credentials that are limited to the bucket and prefix that this user should be able to read or write:
+
+```sql
+CREATE OR REPLACE SECRET finance_lake_r2 (
+  TYPE r2,
+  KEY_ID '<r2-access-key-id>',
+  SECRET '<r2-secret-access-key>',
+  ACCOUNT_ID '<cloudflare-account-id>',
+  SCOPE 'r2://<bucket>/<prefix>/'
+);
+```
+
+If your DuckDB build uses the generic S3 secret path for R2:
+
+```sql
+CREATE OR REPLACE SECRET finance_lake_s3 (
+  TYPE s3,
+  PROVIDER config,
+  KEY_ID '<r2-access-key-id>',
+  SECRET '<r2-secret-access-key>',
+  ENDPOINT '<account-id>.r2.cloudflarestorage.com',
+  URL_STYLE 'path',
+  REGION 'auto',
+  SCOPE 'r2://<bucket>/<prefix>/'
+);
+```
+
+Attach the DuckLake catalog through Quack:
+
+```sql
+ATTACH 'ducklake:quack:<worker-host>:443' AS finance_lake (
+  DATA_PATH 'r2://<bucket>/<prefix>/'
+);
+```
+
+Reader query:
+
+```sql
+SELECT id, tenant_id, amount, created_at
+FROM finance_lake.finance.invoices
+LIMIT 10;
+```
+
+Analyst query:
+
+```sql
+SELECT tenant_id, status, sum(amount) AS total_amount
+FROM finance_lake.finance.invoices
+GROUP BY tenant_id, status
+ORDER BY total_amount DESC;
+```
+
+Writer query:
+
+```sql
+INSERT INTO finance_lake.finance.adjustments (id, tenant_id, amount, created_at)
+VALUES (1001, '<tenant-guid>', 42.50, now());
+```
+
+Queries that exceed the user's profile fail before execution against the catalog. Examples:
+
+- Reader tries `SELECT * FROM finance_lake.finance.invoices`.
+- Reader tries `INSERT INTO finance_lake.finance.invoices ...`.
+- Analyst tries to read `finance.employees.salary`.
+- Tenant user lacks a useful tenant claim or the data does not store the expected tenant GUID.
+
+## 10. How Entra Groups Become Query Permissions
+
+The full path is:
+
+1. User signs in to Entra ID.
+2. The client obtains an access token for the quacklake API scope.
+3. The access token contains `iss`, `aud`, `oid`, `tid`, `scp`, expiry claims, and group membership in `groups` if group claims are configured and not over the token limit.
+4. DuckDB sends the token as the Quack auth string.
+5. quacklake verifies the token against the registered provider:
+   - `iss` equals the configured tenant issuer.
+   - `aud` equals the configured API app ID.
+   - `alg` is `RS256`.
+   - `kid` resolves in the Entra JWKS.
+   - `exp` and `nbf` are valid within clock tolerance.
+6. quacklake applies `claimMapping`:
+   - `oid` becomes `principal.subject`.
+   - `scp` becomes `principal.scopes`.
+   - `groups` becomes `principal.groups`.
+   - `roles` becomes `principal.roles`.
+   - `tid` becomes `principal.claims.tenantId`.
+7. quacklake scans catalog auth mappings for this provider.
+8. Exactly one catalog mapping must match.
+9. The catalog Durable Object stores the principal in the session.
+10. Every prepared SQL statement is classified into required actions and resources.
+11. The catalog policy decides allow or deny before execution.
+
+## 11. App Roles Alternative
+
+For large tenants, app roles are often a better profile mechanism than raw group claims because they avoid group overage. Assign Entra groups to app roles such as:
+
+- `Finance.Reader`
+- `Finance.Analyst`
+- `Finance.Writer`
+- `Finance.Admin`
+
+Entra emits assigned app roles in the `roles` claim. quacklake maps that claim to `principal.roles`.
+
+Policy rules can then match roles instead of group object IDs:
+
+```json
+{
+  "ruleId": "entra-role-finance-readers",
+  "effect": "allow",
+  "principal": {
+    "scopesAny": ["Catalog.Access"],
+    "rolesAny": ["Finance.Reader"]
+  },
+  "actions": ["schema.read", "table.read", "column.read"],
+  "resource": {
+    "schema": "finance",
+    "table": "*",
+    "columns": ["id", "tenant_id", "amount", "created_at"]
+  }
+}
+```
+
+Use either groups or app roles consistently for a catalog. Mixing both can be useful during migration, but it also makes explain output and audits harder to reason about.
+
+## 12. Operational Patterns
+
+Use groups for stable profiles when group counts are modest:
+
+- `dq-finance-readers`
+- `dq-finance-analysts`
+- `dq-finance-writers`
+- `dq-finance-admins`
+
+Use app roles when:
+
+- Users are members of many groups.
+- You want readable role names in tokens.
+- You want to assign multiple groups to one quacklake permission profile without listing every group object ID in policy.
+
+Use claims for tenant or organization facts:
+
+- `tid` mapped to `claims.tenantId` when rows store Entra tenant IDs.
+- A custom optional claim mapped to `claims.tenantId` when rows store an application tenant identifier.
+
+Use one catalog policy per catalog:
+
+- Add profile rules to the same policy document.
+- Keep generated rule ids stable so updates can replace a known profile rule.
+- Use deny rules for high-risk columns.
+- Keep `defaultEffect: "deny"` outside local bootstrap workflows.
+
+Use `POST /admin/authz/explain` before handing a profile to users:
+
+- Test a known allowed read.
+- Test a known denied column.
+- Test `SELECT *` when the profile should be column-limited.
+- Test a mutation when the profile should be read-only.
+- Test tenant users with expected tenant claims.
+
+## 13. Troubleshooting
+
+| Symptom | Likely cause | Fix |
+| --- | --- | --- |
+| `Invalid auth JWT` | Wrong issuer, audience, signing key, algorithm, expiry, or JWKS. | Check provider config and decode token headers/claims. |
+| Token verifies but no catalog resolves | Catalog auth mapping does not match token scopes, groups, roles, or claims. | Inspect `principal` with `/admin/authz/explain`; update mapping. |
+| Authentication denied as ambiguous | The same Entra token matches mappings on more than one catalog. | Make mappings mutually exclusive by group, role, claim, or scope. |
+| `principal.groups` is empty | Group claims are not configured, or Entra emitted group overage instead of group IDs. | Configure group claims for access tokens, reduce groups, or use app roles. |
+| Query denied for `column.read` | Policy does not grant the projected column, or the query uses `SELECT *`. | Select explicit allowed columns or update policy. |
+| Tenant rule does not match | The mapped tenant claim does not exist or rows store a different tenant identifier. | Verify `claims.tenantId` in explain and align the row predicate with your data model. |
+| Group change not reflected | User is still using an old token. | Sign in again or refresh the token. |
+| DuckDB can still read files directly | Storage credentials are broader than the catalog policy. | Issue narrower R2/S3 credentials or separate data prefixes/catalogs. |
+| `read_blob()` or DuckLake cleanup fails in Worker | Worker lacks R2 binding for the bucket. | Configure `DUCKLAKE_R2_BINDINGS` and an R2 bucket binding in `wrangler.jsonc`. |
+
+## 14. Security Checklist
+
+- Use access tokens for quacklake API access.
+- Configure provider `audiences` to the actual `aud` value in the access token.
+- Use group object IDs in policy when Entra emits group object IDs.
+- Prefer app roles if users can exceed group claim limits.
+- Do not use Entra group membership as the only tenant boundary if users can be in multiple tenant groups. Prefer a tenant claim and mutually exclusive catalog mapping, or separate catalogs.
+- Keep the quacklake admin token out of user machines.
+- Keep R2/S3 data credentials scoped to the least privilege needed for the user profile.
+- Prefer separate storage prefixes or buckets when data-file isolation matters.
+- Re-run `/admin/authz/explain` after every policy change.
+- Rotate Entra tokens by signing in again after changing group membership, app role assignment, or optional claims.
+
+## Sources
+
+- Microsoft identity platform access token claims, including `aud`, `iss`, `scp`, and group overage behavior: <https://learn.microsoft.com/en-us/entra/identity-platform/access-token-claims-reference>
+- Configure group claims and app roles in tokens, including group object IDs, roles claims, and group overage limits: <https://learn.microsoft.com/en-us/security/zero-trust/develop/configure-tokens-group-claims-app-roles>
+- Configure an application to expose a web API and define scopes: <https://learn.microsoft.com/en-us/entra/identity-platform/quickstart-configure-app-expose-web-apis>
+- Scopes and permissions in the Microsoft identity platform: <https://learn.microsoft.com/en-us/entra/identity-platform/scopes-oidc>
+- Azure CLI `az account get-access-token` supports requesting access tokens with `--scope`: <https://learn.microsoft.com/en-us/cli/azure/account?view=azure-cli-latest#az-account-get-access-token>

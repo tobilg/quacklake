@@ -1,0 +1,61 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "quacklake",
+  "main": ".wrangler-build/index.js",
+  "compatibility_date": "2026-05-14",
+  "compatibility_flags": ["nodejs_compat"],
+  "no_bundle": true,
+  "find_additional_modules": false,
+  "rules": [
+    {
+      "type": "CompiledWasm",
+      "globs": ["**/*.wasm"],
+      "fallthrough": true
+    }
+  ],
+  "build": {
+    "command": "vite build --config vite.worker.config.ts",
+    "watch_dir": "src"
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "vars": {
+    "QUACK_FETCH_ROWS_PER_CHUNK": "1024",
+    "QUACK_FETCH_CHUNKS_PER_BATCH": "12",
+    "QUACKLAKE_JWT_ISSUER": "quacklake",
+    "QUACKLAKE_JWT_AUDIENCE": "quacklake:quack",
+    "QUACKLAKE_JWT_DEFAULT_TTL_SECONDS": "31536000",
+    "DUCKLAKE_R2_BINDINGS": "{\"replace-with-your-r2-bucket\":\"DUCKLAKE_R2\"}",
+    // Optional, only for catalogs created with dataAccessMode="trusted_client":
+    // "DUCKLAKE_R2_DATA_LEASE_TTL_SECONDS": "60",
+    // "R2_ACCOUNT_ID": "replace-with-your-cloudflare-account-id",
+    // "R2_ENDPOINT": "https://replace-with-your-cloudflare-account-id.r2.cloudflarestorage.com"
+  },
+  "r2_buckets": [
+    {
+      "binding": "DUCKLAKE_R2",
+      "bucket_name": "replace-with-your-r2-bucket",
+      "jurisdiction": "eu"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "CATALOG_REGISTRY",
+        "class_name": "CatalogRegistry"
+      },
+      {
+        "name": "QUACK_CATALOGS",
+        "class_name": "QuackCatalogObject"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["CatalogRegistry", "QuackCatalogObject"]
+    }
+  ]
+}
