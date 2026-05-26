@@ -27,7 +27,7 @@ Options:
   --catalog-id ID       Catalog id to create or use. Default: personal.
   --scope SCOPE         JWT scope and policy principal scope. Default: catalog.admin.
   --ttl-seconds SECONDS JWT validity in seconds. Default: 31536000 (365 days).
-  --output-file PATH    Write a JSON summary including the one-time-visible JWT.
+  --output-file PATH    Write a JSON summary including the one-time-visible JWT and DuckLake SQL.
   -h, --help            Show this help.
 
 Examples:
@@ -85,6 +85,33 @@ process.stdin.on("end", () => {
   }
 });
 ' "${field_path}"
+}
+
+catalog_data_path() {
+  local catalog_id="$1"
+  node -e '
+const catalogId = process.argv[1];
+let body = "";
+process.stdin.on("data", (chunk) => {
+  body += chunk;
+});
+process.stdin.on("end", () => {
+  let data;
+  try {
+    data = JSON.parse(body);
+  } catch {
+    process.exit(0);
+  }
+  const catalog = (data.catalogs ?? []).find((entry) => entry?.catalogId === catalogId);
+  if (catalog?.dataPath) {
+    process.stdout.write(String(catalog.dataPath));
+  }
+});
+' "${catalog_id}"
+}
+
+sql_literal() {
+  node -e "process.stdout.write(\"'\" + String(process.argv[1] ?? '').replaceAll(\"'\", \"''\") + \"'\");" "$1"
 }
 
 credential_payload() {
@@ -156,8 +183,8 @@ NODE
 }
 
 json_summary() {
-  node - "$catalog_id" "$personal_scope" "$jwt_ttl_seconds" "$credential_id" "$expires_at" "$worker_url" "$quack_uri" "$jwt" <<'NODE'
-const [catalogId, scope, ttlSeconds, credentialId, expiresAt, workerUrl, quackUri, jwt] = process.argv.slice(2);
+  node - "$catalog_id" "$personal_scope" "$jwt_ttl_seconds" "$credential_id" "$expires_at" "$worker_url" "$quack_uri" "$data_path" "$jwt" "$duckdb_secret_sql" "$ducklake_attach_sql" <<'NODE'
+const [catalogId, scope, ttlSeconds, credentialId, expiresAt, workerUrl, quackUri, dataPath, jwt, secretSql, attachSql] = process.argv.slice(2);
 process.stdout.write(JSON.stringify({
   catalogId,
   scope,
@@ -166,7 +193,14 @@ process.stdout.write(JSON.stringify({
   expiresAt,
   workerUrl,
   quackUri,
+  dataPath,
   jwt,
+  duckdb: {
+    secretSql,
+  },
+  ducklake: {
+    attachSql,
+  },
 }, null, 2));
 process.stdout.write("\n");
 NODE
@@ -258,18 +292,28 @@ trap cleanup EXIT
 create_response="${tmp_dir}/create-catalog.json"
 credential_response="${tmp_dir}/credential.json"
 policy_response="${tmp_dir}/policy.json"
+catalogs_response="${tmp_dir}/catalogs.json"
 
 printf 'Creating first-party credential for catalog %s...\n' "${catalog_id}"
 create_status="$(request POST "${worker_url}/admin/catalogs" "$(credential_payload)" "${create_response}")"
 
 if [[ "${create_status}" == "201" ]]; then
   cp "${create_response}" "${credential_response}"
+  data_path="$(json_field catalog.dataPath <"${create_response}")"
+  if [[ -z "${data_path}" ]]; then
+    data_path="$(json_field ducklake.dataPath <"${create_response}")"
+  fi
 elif [[ "${create_status}" == "409" ]]; then
   printf 'Catalog already exists; issuing another first-party credential...\n'
   credential_status="$(request POST "${worker_url}/admin/catalogs/${encoded_catalog_id}/credentials" "$(credential_only_payload)" "${credential_response}")"
   if [[ "${credential_status}" != "201" ]]; then
     fail "credential creation failed with HTTP ${credential_status}: $(head -c 1000 "${credential_response}")"
   fi
+  catalogs_status="$(request GET "${worker_url}/admin/catalogs" "" "${catalogs_response}")"
+  if [[ ! "${catalogs_status}" =~ ^2[0-9][0-9]$ ]]; then
+    fail "catalog lookup failed with HTTP ${catalogs_status}: $(head -c 1000 "${catalogs_response}")"
+  fi
+  data_path="$(catalog_data_path "${catalog_id}" <"${catalogs_response}")"
 else
   fail "catalog creation failed with HTTP ${create_status}: $(head -c 1000 "${create_response}")"
 fi
@@ -279,6 +323,10 @@ credential_id="$(json_field credentialId <"${credential_response}")"
 expires_at="$(json_field credential.expiresAt <"${credential_response}")"
 [[ -n "${jwt}" ]] || fail "credential response did not contain jwt: $(head -c 1000 "${credential_response}")"
 [[ -n "${credential_id}" ]] || fail "credential response did not contain credentialId: $(head -c 1000 "${credential_response}")"
+[[ -n "${data_path}" ]] || fail "catalog did not contain a planned dataPath"
+
+duckdb_secret_sql="CREATE OR REPLACE SECRET quacklake_${catalog_id//[^A-Za-z0-9_]/_} (TYPE quack, TOKEN $(sql_literal "${jwt}"), SCOPE $(sql_literal "${quack_uri}"));"
+ducklake_attach_sql="ATTACH $(sql_literal "ducklake:${quack_uri}") AS lake (DATA_PATH $(sql_literal "${data_path}"));"
 
 printf 'Installing personal CRUD/read policy for catalog %s...\n' "${catalog_id}"
 policy_status="$(request PUT "${worker_url}/admin/catalogs/${encoded_catalog_id}/auth-policy" "$(policy_payload)" "${policy_response}")"
@@ -298,11 +346,12 @@ printf 'Scope: %s\n' "${personal_scope}"
 printf 'Expires at: %s\n' "${expires_at}"
 printf 'Worker URL: %s\n' "${worker_url}"
 printf 'Quack URI: %s\n' "${quack_uri}"
+printf 'DuckLake DATA_PATH: %s\n' "${data_path}"
 printf '\nJWT:\n%s\n' "${jwt}"
 printf '\nDuckDB secret:\n'
-printf "CREATE OR REPLACE SECRET quacklake_%s (TYPE quack, TOKEN '%s', SCOPE '%s');\n" "${catalog_id//[^A-Za-z0-9_]/_}" "${jwt}" "${quack_uri}"
-printf '\nDuckLake metadata URI:\n'
-printf "ducklake:%s\n" "${quack_uri}"
+printf '%s\n' "${duckdb_secret_sql}"
+printf '\nDuckLake attach:\n'
+printf '%s\n' "${ducklake_attach_sql}"
 if [[ -n "${output_file}" ]]; then
   printf '\nWrote JSON summary to %s\n' "${output_file}"
 fi

@@ -2,6 +2,19 @@
 
 This guide covers client-facing Quack usage, DuckLake attachment, R2-backed data-path requirements, trusted-client R2 data leases, and operational R2 diagnostics.
 
+## DuckDB Extension Versions
+
+Use the `core_nightly` builds of the DuckDB `quack` and `ducklake` extensions
+for quacklake workflows. The stable extension builds may be missing bugfixes
+needed for Quack-backed DuckLake attachment and metadata operations.
+
+```sql
+FORCE INSTALL quack FROM core_nightly;
+FORCE INSTALL ducklake FROM core_nightly;
+LOAD quack;
+LOAD ducklake;
+```
+
 ## Quack Secret
 
 Use a quacklake JWT as the Quack secret token value expected by DuckDB's Quack extension:

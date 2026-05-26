@@ -66,8 +66,8 @@ catalog_json="$(
 token="$(printf '%s' "${catalog_json}" | node -e "let body=''; process.stdin.on('data', chunk => body += chunk); process.stdin.on('end', () => process.stdout.write(JSON.parse(body).token));")"
 
 duckdb -batch -c "
-INSTALL quack FROM core_nightly;
-INSTALL ducklake FROM core_nightly;
+FORCE INSTALL quack FROM core_nightly;
+FORCE INSTALL ducklake FROM core_nightly;
 LOAD quack;
 LOAD ducklake;
 CREATE OR REPLACE SECRET (TYPE quack, TOKEN '${token}');

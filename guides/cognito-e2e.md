@@ -45,7 +45,8 @@ You need:
 - A deployed quacklake Worker.
 - Worker secrets set for `ADMIN_TOKEN`, `QUACKLAKE_JWT_SECRET`, and `CONNECTION_SIGNING_SECRET`.
 - AWS CLI configured with permissions to manage Cognito user pools, app clients, groups, and users.
-- DuckDB with DuckLake and Quack extension support.
+- DuckDB with `core_nightly` DuckLake and Quack extension support. The stable
+  extension builds may be missing bugfixes required by this workflow.
 - R2 or S3 credentials for the DuckLake data path, scoped to the published bucket and prefix.
 
 Set common shell variables:

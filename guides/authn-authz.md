@@ -165,7 +165,7 @@ Default behavior:
 - Issues a JWT with `expiresInSeconds: 31536000`, which is 365 days.
 - Uses `PERSONAL_SCOPE=catalog.admin` for both the JWT scope and the policy principal match.
 - Replaces the catalog's auth policy with a personal-use policy.
-- Prints the one-time-visible JWT and a DuckDB `CREATE SECRET` statement.
+- Prints the one-time-visible JWT, a DuckDB `CREATE SECRET` statement, and a DuckLake `ATTACH` statement with the catalog's planned `DATA_PATH`.
 
 Run it with environment variables:
 
@@ -185,7 +185,7 @@ scripts/create-jwt.sh \
   --output-file /tmp/quacklake-personal.json
 ```
 
-The `--output-file` value receives a JSON document containing the catalog id, scope, credential id, expiry, Worker URL, Quack URI, and raw JWT. Treat that file as a secret:
+The `--output-file` value receives a JSON document containing the catalog id, scope, credential id, expiry, Worker URL, Quack URI, planned DuckLake `DATA_PATH`, raw JWT, and generated SQL. Treat that file as a secret:
 
 ```json
 {
@@ -196,7 +196,14 @@ The `--output-file` value receives a JSON document containing the catalog id, sc
   "expiresAt": "2027-05-19T...",
   "workerUrl": "https://<worker-host>",
   "quackUri": "quack:<worker-host>:443",
-  "jwt": "<jwt>"
+  "dataPath": "r2://<bucket>/catalogs/personal/",
+  "jwt": "<jwt>",
+  "duckdb": {
+    "secretSql": "CREATE OR REPLACE SECRET quacklake_personal (TYPE quack, TOKEN '<jwt>', SCOPE 'quack:<worker-host>:443');"
+  },
+  "ducklake": {
+    "attachSql": "ATTACH 'ducklake:quack:<worker-host>:443' AS lake (DATA_PATH 'r2://<bucket>/catalogs/personal/');"
+  }
 }
 ```
 

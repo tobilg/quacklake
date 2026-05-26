@@ -15,7 +15,9 @@ leases, multiple buckets, or advanced policy design. Use the
 
 - A Cloudflare account.
 - Node.js 22 or newer and `pnpm`.
-- DuckDB CLI with access to the `httpfs`, `quack`, and `ducklake` extensions.
+- DuckDB CLI with access to `httpfs` and the `core_nightly` builds of the
+  `quack` and `ducklake` extensions. The stable extension builds may be missing
+  bugfixes required by this guide.
 - `jq` for the shell examples.
 - One Cloudflare R2 bucket for DuckLake data files.
 - An R2 S3 API token for the DuckDB client. This is separate from Worker
@@ -213,9 +215,10 @@ replaces the catalog policy with a broad `catalog.admin` policy suitable for thi
 single-operator walkthrough. The terminal output and `$JWT_SUMMARY_FILE` contain
 raw JWT material.
 
-If the catalog already existed before you started this guide, retrieve its
-stored planned path and use the `CREATE SECRET` statement printed by
-`scripts/create-jwt.sh`:
+If the catalog already existed before you started this guide, use the
+`CREATE SECRET` and `ATTACH` statements printed by `scripts/create-jwt.sh`. The
+script looks up the stored planned path from `GET /admin/catalogs` before
+printing the `ATTACH` statement. To inspect that path manually:
 
 ```sh
 curl -s "$QUACKLAKE_URL/admin/catalogs" \
@@ -224,7 +227,7 @@ curl -s "$QUACKLAKE_URL/admin/catalogs" \
     '.catalogs[] | select(.catalogId == $catalogId) | .dataPath'
 ```
 
-Then attach DuckLake with that stored path:
+The generated attach statement has this shape:
 
 ```sql
 ATTACH 'ducklake:quack:<worker-host>:443' AS lake (
@@ -240,12 +243,13 @@ Start the DuckDB CLI:
 duckdb
 ```
 
-Install and load the required extensions:
+Install and load the required extensions. Use `core_nightly` for `quack` and
+`ducklake`; those builds contain bugfixes that quacklake currently depends on:
 
 ```sql
 INSTALL httpfs;
-INSTALL quack FROM core_nightly;
-INSTALL ducklake FROM core_nightly;
+FORCE INSTALL quack FROM core_nightly;
+FORCE INSTALL ducklake FROM core_nightly;
 
 LOAD httpfs;
 LOAD quack;

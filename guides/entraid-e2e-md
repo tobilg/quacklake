@@ -72,7 +72,8 @@ You need:
 - Worker secrets set for `ADMIN_TOKEN`, `QUACKLAKE_JWT_SECRET`, and `CONNECTION_SIGNING_SECRET`.
 - Azure CLI authenticated to the target tenant.
 - Permission in Entra ID to create app registrations, create groups, assign users to groups, and configure token claims.
-- DuckDB with DuckLake and Quack extension support.
+- DuckDB with `core_nightly` DuckLake and Quack extension support. The stable
+  extension builds may be missing bugfixes required by this workflow.
 - R2 or S3 credentials for the DuckLake data path, scoped to the published bucket and prefix.
 
 Set common shell variables:

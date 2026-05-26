@@ -214,7 +214,15 @@ See [Local Development And Configuration Guide](./guides/local-development.md) f
 
 Use a JWT as the Quack secret token value:
 
+Use the `core_nightly` DuckDB extension builds for `quack` and `ducklake`; those
+builds contain bugfixes required by the current quacklake workflows.
+
 ```sql
+FORCE INSTALL quack FROM core_nightly;
+FORCE INSTALL ducklake FROM core_nightly;
+LOAD quack;
+LOAD ducklake;
+
 CREATE OR REPLACE SECRET quacklake_catalog (
   TYPE quack,
   TOKEN '<jwt>',

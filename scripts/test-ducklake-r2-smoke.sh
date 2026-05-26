@@ -202,8 +202,8 @@ orphan_path_sql="$(sql_literal "${orphan_path}")"
 
 cat >"${sql_file}" <<SQL
 INSTALL httpfs;
-INSTALL quack FROM core_nightly;
-INSTALL ducklake FROM core_nightly;
+FORCE INSTALL quack FROM core_nightly;
+FORCE INSTALL ducklake FROM core_nightly;
 LOAD httpfs;
 LOAD quack;
 LOAD ducklake;
