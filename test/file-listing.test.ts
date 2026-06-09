@@ -1,7 +1,5 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
-  createExternalFileLister,
-  globPrefix,
   listConfiguredR2Buckets,
   objectStoreLocationFromUri,
   parseR2BindingMap,
@@ -13,13 +11,7 @@ import {
 import type { RuntimeEnv } from "../src/env";
 
 describe("file listing helpers", () => {
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
-
-  it("parses object-store patterns and R2 binding maps defensively", () => {
-    expect(globPrefix("r2://bucket/lake/**/*.parquet")).toBe("r2://bucket/lake/");
-    expect(globPrefix("r2://bucket/lake/a.parquet")).toBe("r2://bucket/lake/a.parquet");
+  it("parses object-store locations and R2 binding maps defensively", () => {
     expect(objectStoreLocationFromUri("s3://bucket/path/file.parquet")).toEqual({
       scheme: "s3",
       bucket: "bucket",
@@ -76,57 +68,6 @@ describe("file listing helpers", () => {
     expect(() => selectConfiguredR2Bucket(multiple, "unknown")).toThrow(/not configured/i);
     expect(() => selectConfiguredR2Bucket({ DUCKLAKE_R2_BINDINGS: JSON.stringify({ lake: "MISSING" }) } as RuntimeEnv)).toThrow(/missing Worker R2 binding/i);
     expect(listConfiguredR2Buckets({} as RuntimeEnv)).toEqual([]);
-  });
-
-  it("combines endpoint and R2 listings, normalizes response shapes, dedupes, and sorts", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
-      files: [
-        "r2://lake/prefix/from-string.parquet",
-        { path: "r2://lake/prefix/from-path.parquet", last_modified: "2026-05-18T00:00:00.000Z" },
-        { filename: "r2://lake/prefix/duplicate.parquet", lastModified: "2026-05-17T00:00:00.000Z" },
-        { nope: true },
-        7
-      ]
-    }))));
-
-    const env = {
-      DUCKLAKE_FILE_LIST_ENDPOINT: "https://files.example/list",
-      DUCKLAKE_FILE_LIST_TOKEN: "secret",
-      DUCKLAKE_R2_BINDINGS: JSON.stringify({ lake: "DUCKLAKE_R2" }),
-      DUCKLAKE_R2: fakeR2Bucket(["prefix/duplicate.parquet", "prefix/from-r2.parquet", "other/ignored.parquet"])
-    } as unknown as RuntimeEnv;
-
-    const files = await createExternalFileLister(env)("r2://lake/prefix/**");
-    expect(files).toEqual([
-      { filename: "r2://lake/prefix/duplicate.parquet", lastModified: "2026-05-15T00:00:00.000Z" },
-      { filename: "r2://lake/prefix/from-path.parquet", lastModified: "2026-05-18T00:00:00.000Z" },
-      { filename: "r2://lake/prefix/from-r2.parquet", lastModified: "2026-05-15T00:00:00.000Z" },
-      { filename: "r2://lake/prefix/from-string.parquet" }
-    ]);
-    expect(fetch).toHaveBeenCalledWith("https://files.example/list", expect.objectContaining({
-      method: "POST",
-      headers: expect.objectContaining({ Authorization: "Bearer secret" }),
-      body: JSON.stringify({ pattern: "r2://lake/prefix/**" })
-    }));
-  });
-
-  it("surfaces file endpoint errors and ignores unmapped object-store patterns", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => new Response("nope", { status: 503 })));
-    await expect(createExternalFileLister({
-      DUCKLAKE_FILE_LIST_ENDPOINT: "https://files.example/list"
-    } as RuntimeEnv)("r2://lake/prefix/**")).rejects.toThrow(/returned 503/);
-
-    vi.unstubAllGlobals();
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ files: "not-an-array" }))));
-    await expect(createExternalFileLister({
-      DUCKLAKE_FILE_LIST_ENDPOINT: "https://files.example/list"
-    } as RuntimeEnv)("not-an-object-store-pattern")).resolves.toEqual([]);
-
-    vi.unstubAllGlobals();
-    await expect(createExternalFileLister({} as RuntimeEnv)("not-an-object-store-pattern")).resolves.toEqual([]);
-    await expect(createExternalFileLister({
-      DUCKLAKE_R2_BINDINGS: JSON.stringify({ lake: "MISSING_BINDING" })
-    } as unknown as RuntimeEnv)("r2://lake/prefix/**")).resolves.toEqual([]);
   });
 });
 

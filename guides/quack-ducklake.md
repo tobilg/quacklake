@@ -6,7 +6,8 @@ This guide covers client-facing Quack usage, DuckLake attachment, R2-backed data
 
 Use the `core_nightly` builds of the DuckDB `quack` and `ducklake` extensions
 for quacklake workflows. The stable extension builds may be missing bugfixes
-needed for Quack-backed DuckLake attachment and metadata operations.
+needed for Quack-backed DuckLake attachment, metadata operations, and client-side
+`ducklake_delete_orphaned_files()` file discovery.
 
 ```sql
 FORCE INSTALL quack FROM core_nightly;
@@ -137,7 +138,7 @@ CREATE OR REPLACE SECRET lake_r2 (
 );
 ```
 
-Do not configure these R2 S3 API keys as Worker secrets for `read_blob()`. The Worker-side `read_blob()` path below uses an R2 binding instead. Configure parent R2 S3 keys as Worker secrets only when using trusted-client leases.
+Do not configure these R2 S3 API keys as Worker secrets. DuckDB uses them locally for data-file reads, writes, and `ducklake_delete_orphaned_files()` object discovery. Configure parent R2 S3 keys as Worker secrets only when using trusted-client leases.
 
 ## Trusted-Client R2 Data Leases
 
@@ -209,7 +210,7 @@ pnpm exec wrangler secret put R2_ACCESS_KEY_ID --name quacklake
 pnpm exec wrangler secret put R2_SECRET_ACCESS_KEY --name quacklake
 ```
 
-The Worker R2 binding and `DUCKLAKE_R2_BINDINGS` are required. They are the runtime source of truth for bucket listing, planned catalog data path generation, path validation, file listing, and trusted-client leases.
+The Worker R2 binding and `DUCKLAKE_R2_BINDINGS` are required. They are the runtime source of truth for bucket registration, planned catalog data path generation, path validation, diagnostics, and trusted-client leases.
 
 ## Planned DATA_PATH Enforcement
 
@@ -227,14 +228,10 @@ Important vars:
 
 - `DUCKLAKE_R2_BINDINGS`: JSON map from DuckLake bucket name to Worker R2 binding name, for example `{"<bucket-name>":"DUCKLAKE_R2"}`. Every usable DuckLake data bucket must also appear in `wrangler.jsonc` `r2_buckets`.
 - `DUCKLAKE_R2_DATA_LEASE_TTL_SECONDS`: trusted-client R2 data lease lifetime in seconds, clamped to 30-120. Default `60`.
-- `DUCKLAKE_FILE_LIST_ENDPOINT`: optional sidecar endpoint for local or non-R2 file listing workflows.
-- `DUCKLAKE_FILE_LIST_TOKEN`: optional bearer token sent to the file-list sidecar endpoint.
 
-## Worker R2 Access For `read_blob()`
+## Worker R2 Binding
 
-Some DuckLake maintenance functions execute metadata SQL that reads object-store listings through `read_blob()`, for example orphan-file discovery during cleanup. With a Quack catalog, that metadata SQL runs inside quacklake, so the deployed Worker must be able to list the same R2 bucket used by the DuckLake `DATA_PATH`.
-
-For `read_blob()` specifically, Worker-side access is not configured with `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_ACCOUNT_ID`, or `R2_ENDPOINT`. It uses a Cloudflare Workers R2 bucket binding in `wrangler.jsonc`. Trusted-client leases additionally use the parent R2 S3 credentials described above for temporary credential signing.
+quacklake still requires a Cloudflare Workers R2 bucket binding in `wrangler.jsonc` so catalogs can choose validated bucket names and diagnostics can verify Worker-side bucket visibility. DuckLake data-file access and orphan cleanup do not use this binding; those operations run in the DuckDB client with the storage secret described above.
 
 Create or choose an R2 bucket:
 
@@ -288,14 +285,14 @@ curl -s "https://<worker-host>/admin/r2-buckets" \
   -H "Authorization: Bearer $ADMIN_TOKEN"
 ```
 
-Each entry reports `available: true` only when the named Worker binding exists and looks like an R2 bucket binding. Then verify the Worker can see an object under the DuckLake prefix:
+Each entry reports `available: true` only when the named Worker binding exists and looks like an R2 bucket binding. To debug Worker-side bucket mapping, verify the Worker can see an object under the DuckLake prefix:
 
 ```sh
 curl -s "https://<worker-host>/admin/r2/diagnostics?path=r2://<bucket>/<prefix>/<object>" \
   -H "Authorization: Bearer $ADMIN_TOKEN"
 ```
 
-For `read_blob()`-backed orphan cleanup to work, the diagnostic response must show the bucket mapped to a binding. A `424` response means the bucket is not mapped to any Worker R2 binding. A `404` response means the binding exists, but the requested object key is not visible through that binding.
+Diagnostics are for Worker binding setup only. A `424` response means the bucket is not mapped to any Worker R2 binding. A `404` response means the binding exists, but the requested object key is not visible through that binding.
 
 ## R2 Diagnostics
 
@@ -331,33 +328,6 @@ Common failure cases:
 - `400`: missing `path`/`uri`, or the URI is not `r2://` or `s3://`.
 - `404`: the bucket is mapped to a Worker R2 binding, but the requested key is not visible.
 - `424`: the bucket is not mapped to a Worker R2 binding.
-
-## File Inventory
-
-Catalog-side file inventory is used by orphan-cleanup diagnostics and tests.
-
-Replace file inventory:
-
-```sh
-curl -s -X PUT http://localhost:8787/admin/catalogs/default/files \
-  -H 'Authorization: Bearer admin-test-token' \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "files": [
-      {
-        "filename": "r2://bucket/lake/a.parquet",
-        "lastModified": "2026-05-19T10:00:00.000Z"
-      }
-    ]
-  }'
-```
-
-List file inventory:
-
-```sh
-curl -s http://localhost:8787/admin/catalogs/default/files \
-  -H 'Authorization: Bearer admin-test-token'
-```
 
 ## Operational Notes
 

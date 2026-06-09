@@ -1,6 +1,6 @@
 import { copyFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import type { Plugin, ResolvedConfig } from "vite";
 
 export interface PolyglotSqlSdkWorkersPluginOptions {
@@ -12,10 +12,10 @@ const wasmModuleId = "polyglot-sql-sdk-workers-wasm";
 const require = createRequire(import.meta.url);
 const sdkDist = dirname(require.resolve("@polyglot-sql/sdk"));
 const sdkEntry = resolve(sdkDist, "index.js");
-const sdkWasm = resolve(sdkDist, "polyglot_sql_wasm_bg.wasm");
+const sdkWasm = resolveSdkWasm(sdkDist);
 
 export function polyglotSqlSdkWorkersPlugin(options: PolyglotSqlSdkWorkersPluginOptions = {}): Plugin {
-  const { workerBuild = false, wasmFileName = "polyglot_sql_wasm_bg.wasm" } = options;
+  const { workerBuild = false, wasmFileName = basename(sdkWasm) } = options;
   let config: ResolvedConfig | undefined;
 
   return {
@@ -82,7 +82,7 @@ function transformPolyglotSqlSdk(code: string, wasmImport: string): string {
 /**`
   );
 
-  const wasmUrlPattern = /const __vite__wasmUrl = new URL\("\.\/polyglot_sql_wasm_bg\.wasm",\s*import\.meta\.url\)\.href;/;
+  const wasmUrlPattern = /const __vite__wasmUrl = new URL\("\.\/[^"]+\.wasm",\s*import\.meta\.url\)\.href;/;
   if (!wasmUrlPattern.test(transformed)) {
     throw new Error("Unable to transform @polyglot-sql/sdk; expected wasm URL marker was not found");
   }
@@ -94,6 +94,20 @@ function transformPolyglotSqlSdk(code: string, wasmImport: string): string {
   transformed = transformed.replace("URL = globalThis.URL;", "globalThis.URL = globalThis.URL;");
 
   return `import __polyglotWasmModule from ${JSON.stringify(wasmImport)};\n${transformed}`;
+}
+
+function resolveSdkWasm(distDir: string): string {
+  for (const fileName of ["polyglot_sql_wasm_bg.wasm", "polyglot_sql.wasm"]) {
+    const candidate = resolve(distDir, fileName);
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  const wasmFiles = readdirSync(distDir).filter((entry) => entry.endsWith(".wasm")).sort();
+  if (wasmFiles[0]) {
+    return resolve(distDir, wasmFiles[0]);
+  }
+  throw new Error(`Unable to locate @polyglot-sql/sdk wasm file in ${distDir}`);
 }
 
 function workerOutputDir(config: ResolvedConfig, outputDir: string | undefined): string {

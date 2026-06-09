@@ -650,7 +650,7 @@ Use `POST /admin/authz/explain` before handing a profile to users:
 | Tenant rule does not match | `custom:tenant_id` is missing from the token or the provider mapping. | Set the custom attribute, fetch a fresh ID token, and verify `claims.tenantId`. |
 | Group change not reflected | User is still using an old token. | Sign in again or refresh the token. |
 | DuckDB can still read files directly | Storage credentials are broader than the catalog policy. | Issue narrower R2/S3 credentials or separate data prefixes/catalogs. |
-| `read_blob()` or DuckLake cleanup fails in Worker | Worker lacks R2 binding for the bucket. | Configure `DUCKLAKE_R2_BINDINGS` and an R2 bucket binding in `wrangler.jsonc`. |
+| DuckLake cleanup cannot list or delete data files | The DuckDB client's R2/S3 storage secret is missing, too narrow, or points at the wrong endpoint or bucket. | Recreate the client storage secret with a scope that prefixes the catalog `DATA_PATH`. |
 
 ## 12. Security Checklist
 

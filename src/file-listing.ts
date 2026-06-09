@@ -1,12 +1,5 @@
 import type { RuntimeEnv } from "./env";
 
-export interface ListedFile {
-  filename: string;
-  lastModified?: string;
-}
-
-export type FileListFunction = (pattern: string) => Promise<ListedFile[]>;
-
 export interface ObjectStoreLocation {
   scheme: "r2" | "s3";
   bucket: string;
@@ -26,82 +19,6 @@ export interface ConfiguredR2Bucket {
   binding: string;
   available: boolean;
   source: "DUCKLAKE_R2_BINDINGS";
-}
-
-export function createExternalFileLister(env: RuntimeEnv): FileListFunction {
-  return async (pattern: string) => {
-    const endpointFiles = await listFromEndpoint(env, pattern);
-    const r2Files = await listFromR2(env, pattern);
-    return dedupeFiles([...endpointFiles, ...r2Files]);
-  };
-}
-
-export function globPrefix(pattern: string): string {
-  const globIndex = pattern.indexOf("**");
-  return globIndex >= 0 ? pattern.slice(0, globIndex) : pattern;
-}
-
-function dedupeFiles(files: ListedFile[]): ListedFile[] {
-  const byName = new Map<string, ListedFile>();
-  for (const file of files) {
-    byName.set(file.filename, file);
-  }
-  return [...byName.values()].sort((left, right) => left.filename.localeCompare(right.filename));
-}
-
-async function listFromEndpoint(env: RuntimeEnv, pattern: string): Promise<ListedFile[]> {
-  if (!env.DUCKLAKE_FILE_LIST_ENDPOINT) {
-    return [];
-  }
-  const response = await fetch(env.DUCKLAKE_FILE_LIST_ENDPOINT, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(env.DUCKLAKE_FILE_LIST_TOKEN ? { Authorization: `Bearer ${env.DUCKLAKE_FILE_LIST_TOKEN}` } : {})
-    },
-    body: JSON.stringify({ pattern })
-  });
-  if (!response.ok) {
-    throw new Error(`File list endpoint returned ${response.status}`);
-  }
-  return normalizeFileListResponse(await response.json());
-}
-
-async function listFromR2(env: RuntimeEnv, pattern: string): Promise<ListedFile[]> {
-  const parsed = parseObjectStorePattern(pattern);
-  if (!parsed) {
-    return [];
-  }
-  const binding = r2BindingForBucket(env, parsed.bucket);
-  if (!binding) {
-    return [];
-  }
-  const files: ListedFile[] = [];
-  let cursor: string | undefined;
-  do {
-    const page = await binding.list({ prefix: parsed.keyPrefix, cursor });
-    for (const object of page.objects) {
-      files.push({
-        filename: `${parsed.scheme}://${parsed.bucket}/${object.key}`,
-        lastModified: object.uploaded.toISOString()
-      });
-    }
-    cursor = page.truncated ? page.cursor : undefined;
-  } while (cursor);
-  return files;
-}
-
-function parseObjectStorePattern(pattern: string): { scheme: "r2" | "s3"; bucket: string; keyPrefix: string } | undefined {
-  const prefix = globPrefix(pattern);
-  const location = objectStoreLocationFromUri(prefix);
-  if (!location) {
-    return undefined;
-  }
-  return {
-    scheme: location.scheme,
-    bucket: location.bucket,
-    keyPrefix: location.key
-  };
 }
 
 export function r2BindingForBucket(env: RuntimeEnv, bucketName: string): R2Bucket | undefined {
@@ -208,34 +125,4 @@ function singleConfiguredBucket(buckets: ConfiguredR2Bucket[]): ConfiguredR2Buck
     return buckets[0];
   }
   return undefined;
-}
-
-function normalizeFileListResponse(raw: unknown): ListedFile[] {
-  const files = Array.isArray(raw) ? raw : (raw as { files?: unknown }).files;
-  if (!Array.isArray(files)) {
-    return [];
-  }
-  return files.flatMap((item): ListedFile[] => {
-    if (typeof item === "string") {
-      return [{ filename: item }];
-    }
-    if (!item || typeof item !== "object") {
-      return [];
-    }
-    const candidate = item as { filename?: unknown; path?: unknown; lastModified?: unknown; last_modified?: unknown };
-    const filename = typeof candidate.filename === "string"
-      ? candidate.filename
-      : typeof candidate.path === "string"
-        ? candidate.path
-        : undefined;
-    if (!filename) {
-      return [];
-    }
-    const lastModified = typeof candidate.lastModified === "string"
-      ? candidate.lastModified
-      : typeof candidate.last_modified === "string"
-        ? candidate.last_modified
-        : undefined;
-    return [{ filename, ...(lastModified ? { lastModified } : {}) }];
-  });
 }

@@ -6,8 +6,6 @@ import type { LogicalType, QuackDataChunk } from "./quack-imports";
 import type { Schema, TableSchema } from "@polyglot-sql/sdk";
 import { DuckLakeMetadataCompat } from "./ducklake-metadata";
 import { duckLakeDataPathValuesFromMetadataWrite } from "./ducklake-data-path";
-import { globPrefix } from "./file-listing";
-import type { FileListFunction, ListedFile } from "./file-listing";
 import {
   deserializeLogicalType,
   inferLogicalType,
@@ -35,24 +33,20 @@ export { normalizeTableName } from "./sql-names";
 export { rewriteDuckDbSql } from "./sql-rewrite";
 
 export interface SqlCompatibilityLayerOptions {
-  listFiles?: FileListFunction;
   validateDuckLakeDataPath?: (dataPath: string) => void;
 }
 
 export class SqlCompatibilityLayer {
   private readonly duckLake: DuckLakeMetadataCompat;
-  private readonly externalListFiles: FileListFunction | undefined;
   private readonly validateDuckLakeDataPath: ((dataPath: string) => void) | undefined;
 
   constructor(private readonly sql: SqlStorage, options: SqlCompatibilityLayerOptions = {}) {
-    this.externalListFiles = options.listFiles;
     this.validateDuckLakeDataPath = options.validateDuckLakeDataPath;
     this.duckLake = new DuckLakeMetadataCompat({
       sql,
       tableExists: (tableName) => this.tableExists(tableName),
       tableRowCount: (tableName) => this.tableRowCount(tableName),
-      bumpTableVersion: (tableName) => this.bumpTableVersion(tableName),
-      listFiles: (pattern) => this.listFiles(pattern)
+      bumpTableVersion: (tableName) => this.bumpTableVersion(tableName)
     });
   }
 
@@ -95,12 +89,6 @@ export class SqlCompatibilityLayer {
         tx_id TEXT NOT NULL,
         snapshot_json TEXT NOT NULL,
         created_at TEXT NOT NULL
-      )
-    `);
-    this.sql.exec(`
-      CREATE TABLE IF NOT EXISTS __dq_file_inventory (
-        filename TEXT PRIMARY KEY,
-        last_modified TEXT
       )
     `);
   }
@@ -221,30 +209,6 @@ export class SqlCompatibilityLayer {
 
   duckLakeDataPath(): string | undefined {
     return this.duckLakeDataPaths()[0];
-  }
-
-  replaceFileInventory(files: ListedFile[]): { files: number } {
-    this.sql.exec("DELETE FROM __dq_file_inventory");
-    for (const file of files) {
-      this.sql.exec(
-        "INSERT OR REPLACE INTO __dq_file_inventory (filename, last_modified) VALUES (?, ?)",
-        file.filename,
-        file.lastModified ?? null
-      );
-    }
-    return { files: files.length };
-  }
-
-  listFileInventory(): ListedFile[] {
-    return this.sql
-      .exec<{ filename: string; last_modified: string | null }>(
-        "SELECT filename, last_modified FROM __dq_file_inventory ORDER BY filename"
-      )
-      .toArray()
-      .map((row) => ({
-        filename: row.filename,
-        ...(row.last_modified ? { lastModified: row.last_modified } : {})
-      }));
   }
 
   private async executeOne(sessionId: string, statement: string, options: SqlExecutionOptions): Promise<QueryResultData> {
@@ -709,21 +673,6 @@ export class SqlCompatibilityLayer {
       dataPaths.push(...rows.map((row) => row.value));
     }
     return dataPaths;
-  }
-
-  private async listFiles(pattern: string): Promise<ListedFile[]> {
-    const external = this.externalListFiles ? await this.externalListFiles(pattern) : [];
-    const inventory = this.listInventoryFiles(pattern);
-    const byName = new Map<string, ListedFile>();
-    for (const file of [...external, ...inventory]) {
-      byName.set(file.filename, file);
-    }
-    return [...byName.values()].sort((left, right) => left.filename.localeCompare(right.filename));
-  }
-
-  private listInventoryFiles(pattern: string): ListedFile[] {
-    const prefix = globPrefix(pattern);
-    return this.listFileInventory().filter((file) => file.filename.startsWith(prefix));
   }
 
   private bumpTableVersion(tableName: string): void {

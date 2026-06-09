@@ -88,6 +88,7 @@ describe("JWT authentication and catalog authorization", () => {
     expect(docs.paths["/admin/authz/explain"]?.post).toMatchObject({
       operationId: "explainAuthz"
     });
+    expect(docs.paths["/admin/catalogs/{catalogId}/files"]).toBeUndefined();
     expect(docs.components.securitySchemes.AdminBearer).toMatchObject({ type: "http", scheme: "bearer" });
     expect(docs.components.schemas).toMatchObject({
       CreateCatalogRequest: expect.any(Object),

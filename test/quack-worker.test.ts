@@ -7,8 +7,6 @@ import {
   duckLakeDataPathValuesFromMetadataWrite,
   plannedDuckLakeDataPath
 } from "../src/ducklake-data-path";
-import { createExternalFileLister } from "../src/file-listing";
-import type { RuntimeEnv } from "../src/env";
 
 const adminHeaders = {
   Authorization: "Bearer admin-test-token",
@@ -36,21 +34,6 @@ function testR2BucketName(): string {
 
 function r2TestUri(key: string, scheme: "r2" | "s3" = "r2"): string {
   return `${scheme}://${testR2BucketName()}/${key}`;
-}
-
-function objectKeyPrefixFromDataPath(dataPath: string): string {
-  const prefix = `r2://${testR2BucketName()}/`;
-  if (!dataPath.startsWith(prefix)) {
-    throw new Error(`Unexpected test dataPath ${dataPath}`);
-  }
-  return dataPath.slice(prefix.length);
-}
-
-function r2TestRuntimeEnv(files: Record<string, ArrayBuffer>): RuntimeEnv {
-  return {
-    DUCKLAKE_R2_BINDINGS: JSON.stringify({ [testR2BucketName()]: "DUCKLAKE_R2" }),
-    DUCKLAKE_R2: fakeR2Bucket(files)
-  } as unknown as RuntimeEnv;
 }
 
 async function createCatalogClient(prefix: string): Promise<QuackClient> {
@@ -249,22 +232,6 @@ describe("durable Quack Worker", () => {
     }
   });
 
-  it("lists R2-backed DuckLake orphan-file candidates from read_blob glob prefixes", async () => {
-    const bytes = arrayBufferFromBase64(simpleParquetBase64);
-    const listFiles = createExternalFileLister(
-      r2TestRuntimeEnv({
-        "lake/a.parquet": bytes,
-        "lake/nested/b.parquet": bytes,
-        "other/c.parquet": bytes
-      })
-    );
-
-    await expect(listFiles(r2TestUri("lake/**"))).resolves.toEqual([
-      { filename: r2TestUri("lake/a.parquet"), lastModified: "2026-05-15T00:00:00.000Z" },
-      { filename: r2TestUri("lake/nested/b.parquet"), lastModified: "2026-05-15T00:00:00.000Z" }
-    ]);
-  });
-
   it("enforces the planned DuckLake DATA_PATH policy", () => {
     const plannedDataPath = plannedDuckLakeDataPath(testR2BucketName(), "finance");
 
@@ -332,30 +299,12 @@ describe("durable Quack Worker", () => {
     }
   });
 
-  it("filters R2-backed DuckLake orphan candidates using registered catalog files", async () => {
+  it("does not execute DuckLake orphan-file read_blob probes inside quacklake", async () => {
     const { client, dataPath } = await createCatalog("r2_orphans");
-    const bucket = boundTestR2Bucket();
-    const bytes = arrayBufferFromBase64(simpleParquetBase64);
-    const prefix = objectKeyPrefixFromDataPath(dataPath);
-    await bucket.put(`${prefix}main/items/registered.parquet`, bytes);
-    await bucket.put(`${prefix}scheduled.parquet`, bytes);
-    await bucket.put(`${prefix}orphan.parquet`, bytes);
-    await bucket.put(`${prefix}not-parquet.txt`, bytes);
 
     try {
       await runDuckLakeBootstrapSqlFixture(client, dataPath);
-      await client.query(`
-        INSERT INTO "main".ducklake_snapshot VALUES (1, NOW(), 1, 3, 12);
-        INSERT INTO "main".ducklake_table VALUES (1, UUID(), 1, NULL, 0, 'items', 'items/', true);
-        INSERT INTO "main".ducklake_data_file VALUES
-          (110, 1, 1, NULL, 0, 'registered.parquet', true, 'parquet', 1, 10, 1, 0, NULL, NULL, NULL, NULL);
-        INSERT INTO "main".ducklake_files_scheduled_for_deletion VALUES
-          (111, 'scheduled.parquet', true, NOW());
-      `);
-
-      expect((await client.query(duckLakeOrphanFilesForCleanupQuery(dataPath))).rows()).toEqual([
-        { filename: `${dataPath}orphan.parquet` }
-      ]);
+      await expect(client.query(duckLakeOrphanFilesForCleanupQuery(dataPath))).rejects.toThrow(/read_blob|no such table/i);
     } finally {
       await client.disconnect();
     }
@@ -1097,8 +1046,6 @@ describe("durable Quack Worker", () => {
           path_is_relative: true
         })
       ]);
-      expect((await client.query(duckLakeOrphanFilesForCleanupQuery())).rows()).toEqual([]);
-
       expect((await client.values<bigint>(duckLakeNetDataFileRowCountWithInlinedDeletionsQuery(1, 2, "ducklake_inlined_delete_1")))).toEqual([2n]);
       expect((await client.values<bigint>(duckLakeNetInlinedRowCountQuery("ducklake_inlined_data_1_2", 2)))).toEqual([1n]);
 
@@ -1161,52 +1108,6 @@ describe("durable Quack Worker", () => {
       expect((await client.query("SELECT data_file_id, path FROM \"main\".ducklake_files_scheduled_for_deletion WHERE data_file_id IN (90, 91) ORDER BY data_file_id")).rows()).toEqual([
         { data_file_id: 90n, path: "expired/data.parquet" },
         { data_file_id: 91n, path: "expired/delete.parquet" }
-      ]);
-    } finally {
-      await client.disconnect();
-    }
-  });
-
-  it("detects DuckLake orphan-file cleanup probes from catalog file inventory", async () => {
-    const { catalogId, client } = await createCatalog("ducklake_orphans");
-    try {
-      await runDuckLakeBootstrapSqlFixture(client);
-      await client.query(`
-        INSERT INTO "main".ducklake_snapshot VALUES (1, NOW(), 1, 3, 12);
-        INSERT INTO "main".ducklake_table VALUES (1, UUID(), 1, NULL, 0, 'items', 'items/', true);
-        INSERT INTO "main".ducklake_data_file VALUES
-          (110, 1, 1, NULL, 0, '/lake/known.parquet', false, 'parquet', 1, 10, 1, 0, NULL, NULL, NULL, NULL);
-        INSERT INTO "main".ducklake_files_scheduled_for_deletion VALUES
-          (111, 'scheduled.parquet', true, NOW());
-      `);
-      const inventory = await SELF.fetch(`http://example.com/admin/catalogs/${encodeURIComponent(catalogId)}/files`, {
-        method: "PUT",
-        headers: adminHeaders,
-        body: JSON.stringify({
-          files: [
-            { filename: "/lake/known.parquet", lastModified: "2026-05-14T00:00:00.000Z" },
-            { filename: "/lake/scheduled.parquet", lastModified: "2026-05-14T00:00:00.000Z" },
-            { filename: "/lake/orphan.parquet", lastModified: "2026-05-14T00:00:00.000Z" },
-            { filename: "/lake/not-parquet.txt", lastModified: "2026-05-14T00:00:00.000Z" }
-          ]
-        })
-      });
-      expect(inventory.status).toBe(200);
-      expect(await inventory.json()).toEqual({ files: 4 });
-
-      const listed = await SELF.fetch(`http://example.com/admin/catalogs/${encodeURIComponent(catalogId)}/files`, {
-        headers: adminHeaders
-      });
-      expect(listed.status).toBe(200);
-      expect((await listed.json<{ files: Array<{ filename: string }> }>()).files.map((file) => file.filename)).toEqual([
-        "/lake/known.parquet",
-        "/lake/not-parquet.txt",
-        "/lake/orphan.parquet",
-        "/lake/scheduled.parquet"
-      ]);
-
-      expect((await client.query(duckLakeOrphanFilesForCleanupQuery())).rows()).toEqual([
-        { filename: "/lake/orphan.parquet" }
       ]);
     } finally {
       await client.disconnect();

@@ -79,7 +79,6 @@ const openApiDocumentValue = {
     { name: "Catalog Auth Policies", description: "Server-side authorization policies evaluated before catalog SQL and append execution." },
     { name: "Authorization", description: "Authentication and policy explain tooling." },
     { name: "Data Leases", description: "Trusted-client raw R2 credential leases scoped to a catalog data path." },
-    { name: "Files", description: "Catalog file inventory used by DuckLake orphan-cleanup diagnostics and tests." },
     { name: "Diagnostics", description: "Operational diagnostics for Worker-bound R2 access." },
     { name: "R2 Buckets", description: "Configured DuckLake R2 bucket registry derived from DUCKLAKE_R2_BINDINGS." }
   ],
@@ -559,52 +558,6 @@ const openApiDocumentValue = {
             }
           },
           "400": { $ref: "#/components/responses/BadRequest" },
-          ...errorResponses
-        }
-      }
-    },
-    "/admin/catalogs/{catalogId}/files": {
-      get: {
-        tags: ["Files"],
-        summary: "List catalog file inventory",
-        operationId: "listCatalogFiles",
-        security: adminSecurity,
-        parameters: [catalogIdParameter],
-        responses: {
-          "200": {
-            description: "Registered file inventory",
-            content: {
-              "application/json": {
-                schema: { $ref: "#/components/schemas/ListFileInventoryResponse" }
-              }
-            }
-          },
-          ...errorResponses
-        }
-      },
-      put: {
-        tags: ["Files"],
-        summary: "Replace catalog file inventory",
-        operationId: "replaceCatalogFiles",
-        security: adminSecurity,
-        parameters: [catalogIdParameter],
-        requestBody: {
-          required: true,
-          content: {
-            "application/json": {
-              schema: { $ref: "#/components/schemas/ReplaceFileInventoryRequest" }
-            }
-          }
-        },
-        responses: {
-          "200": {
-            description: "Number of registered files",
-            content: {
-              "application/json": {
-                schema: { $ref: "#/components/schemas/ReplaceFileInventoryResponse" }
-              }
-            }
-          },
           ...errorResponses
         }
       }
@@ -1728,40 +1681,6 @@ const openApiDocumentValue = {
             additionalProperties: false
           },
           warning: { type: "string" }
-        },
-        additionalProperties: false
-      },
-      FileInventoryEntry: {
-        type: "object",
-        required: ["filename"],
-        properties: {
-          filename: { type: "string" },
-          lastModified: { type: "string", format: "date-time" },
-          last_modified: { type: "string", format: "date-time", deprecated: true }
-        },
-        additionalProperties: false
-      },
-      ReplaceFileInventoryRequest: {
-        type: "object",
-        required: ["files"],
-        properties: {
-          files: { type: "array", items: { $ref: "#/components/schemas/FileInventoryEntry" } }
-        },
-        additionalProperties: false
-      },
-      ReplaceFileInventoryResponse: {
-        type: "object",
-        required: ["files"],
-        properties: {
-          files: { type: "integer", minimum: 0 }
-        },
-        additionalProperties: false
-      },
-      ListFileInventoryResponse: {
-        type: "object",
-        required: ["files"],
-        properties: {
-          files: { type: "array", items: { $ref: "#/components/schemas/FileInventoryEntry" } }
         },
         additionalProperties: false
       },

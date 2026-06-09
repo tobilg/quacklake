@@ -2,7 +2,7 @@
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "quacklake",
   "main": ".wrangler-build/index.js",
-  "compatibility_date": "2026-05-14",
+  "compatibility_date": "2026-06-09",
   "compatibility_flags": ["nodejs_compat"],
   "no_bundle": true,
   "find_additional_modules": false,

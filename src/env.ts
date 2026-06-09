@@ -23,8 +23,6 @@ export interface SecretBindings {
 
 export interface StorageBindings {
   DUCKLAKE_R2_BINDINGS?: string;
-  DUCKLAKE_FILE_LIST_ENDPOINT?: string;
-  DUCKLAKE_FILE_LIST_TOKEN?: string;
   R2_ACCOUNT_ID?: string;
   R2_ENDPOINT?: string;
   [bindingName: string]: unknown;

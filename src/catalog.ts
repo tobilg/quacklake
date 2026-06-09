@@ -17,8 +17,6 @@ import type {
 import { randomId } from "./crypto";
 import { createDuckLakeDataPathValidator } from "./ducklake-data-path";
 import { SqlCompatibilityLayer } from "./sql-compat";
-import { createExternalFileLister } from "./file-listing";
-import type { ListedFile } from "./file-listing";
 import type { RuntimeEnv } from "./env";
 import type { SessionAuthContext } from "./auth";
 import { classifyAppend, classifySqlText, evaluatePolicy } from "./authz";
@@ -44,7 +42,6 @@ export class QuackCatalogObject extends DurableObject<RuntimeEnv> {
   constructor(ctx: DurableObjectState, env: RuntimeEnv) {
     super(ctx, env);
     this.compat = new SqlCompatibilityLayer(ctx.storage.sql, {
-      listFiles: createExternalFileLister(env),
       validateDuckLakeDataPath: createDuckLakeDataPathValidator(() => this.plannedDataPath())
     });
     ctx.blockConcurrencyWhile(async () => {
@@ -93,14 +90,6 @@ export class QuackCatalogObject extends DurableObject<RuntimeEnv> {
     const base = this.compat.stats();
     const results = this.ctx.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM __dq_results").one().count;
     return { ...base, results };
-  }
-
-  replaceFileInventory(files: ListedFile[]): { files: number } {
-    return this.compat.replaceFileInventory(files);
-  }
-
-  listFileInventory(): { files: ListedFile[] } {
-    return { files: this.compat.listFileInventory() };
   }
 
   authorizationSchema(): Schema {

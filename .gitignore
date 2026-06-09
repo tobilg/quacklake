@@ -165,3 +165,5 @@ worker-configuration.local.d.ts
 # Temporary files
 .tmp
 .DS_Store
+
+*.sql

@@ -21,7 +21,7 @@ Implemented:
 - Catalog auth policies that authorize SQL and append requests before execution.
 - SQLite-backed query execution with DuckDB-style compatibility rewrites.
 - Planned R2-backed DuckLake `DATA_PATH` assignment and enforcement per catalog.
-- R2-backed DuckLake file discovery for orphan cleanup.
+- DuckLake metadata query support for cleanup and compaction workflows.
 - Optional trusted-client R2 data leases for catalogs created with `dataAccessMode: "trusted_client"`.
 - Result materialization into Quack `DataChunk`s using `@quack-protocol/sdk`.
 - Basic explicit transaction emulation with snapshot restore on `ROLLBACK`.
@@ -45,7 +45,7 @@ The README is intentionally a short project entry point. Detailed operational do
 - [Authn/Authz Guide](./guides/authn-authz.md): JWT-only authentication, first-party credentials, OIDC providers, catalog mappings, catalog policies, policy cookbook, explain output, and troubleshooting.
 - [Cognito End-To-End Guide](./guides/cognito-e2e.md): Cognito user-pool setup, group-based permission profiles, catalog mapping, row and column policy examples, and end-user DuckLake querying.
 - [Microsoft Entra ID End-To-End Guide](./guides/entraid-e2e-md): Entra app registration, group and app-role permission profiles, catalog mapping, row and column policy examples, and end-user DuckLake querying.
-- [Quack, DuckLake, And R2 Guide](./guides/quack-ducklake.md): DuckDB Quack secrets, SDK usage, DuckLake attachment, planned R2 `DATA_PATH` enforcement, trusted-client R2 leases, R2 bucket listing, diagnostics, and file inventory endpoints.
+- [Quack, DuckLake, And R2 Guide](./guides/quack-ducklake.md): DuckDB Quack secrets, SDK usage, DuckLake attachment, planned R2 `DATA_PATH` enforcement, trusted-client R2 leases, R2 bucket listing, diagnostics, and cleanup behavior.
 - [Local Development And Configuration Guide](./guides/local-development.md): dependencies, Wrangler configuration, local secrets, development commands, local Worker health checks, and OpenAPI discovery.
 
 The machine-readable Admin API reference is served by a running Worker:
@@ -253,7 +253,7 @@ ATTACH 'ducklake:quack:<worker-host>:443' AS lake (
 
 Manual storage secrets are still the default `catalog_only` setup. For trusted clients, create the catalog with `dataAccessMode: "trusted_client"` and call `POST /catalog/data-lease` with the same catalog JWT to receive short-lived R2 credentials for the planned catalog `DATA_PATH`.
 
-For server-side DuckLake maintenance paths such as `read_blob()` orphan discovery, and for validating trusted-client lease paths, the Worker also needs an R2 bucket binding mapped through `DUCKLAKE_R2_BINDINGS`. See [Quack, DuckLake, And R2 Guide](./guides/quack-ducklake.md) for Worker R2 binding setup, client storage secrets, trusted-client leases, R2 bucket listing, diagnostics, and file inventory examples.
+The Worker needs an R2 bucket binding mapped through `DUCKLAKE_R2_BINDINGS` for catalog bucket registration, planned path validation, diagnostics, and trusted-client lease validation. Normal DuckLake file reads, writes, and orphan cleanup use the DuckDB client's own scoped R2/S3 credentials.
 
 ## Notes
 

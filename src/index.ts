@@ -268,25 +268,6 @@ async function handleAdmin(request: Request, env: RuntimeEnv, url: URL): Promise
         return Response.json(await registry.deleteCatalogAuthPolicy(catalogId));
       }
     }
-    if (segments[3] === "files" && segments.length === 4) {
-      const catalog = env.QUACK_CATALOGS.getByName(`catalog:${catalogId}`) as unknown as {
-        replaceFileInventory(files: Array<{ filename: string; lastModified?: string }>): Promise<{ files: number }>;
-        listFileInventory(): Promise<{ files: Array<{ filename: string; lastModified?: string }> }>;
-      };
-      if (request.method === "PUT") {
-        const body = await readJson<{ files?: Array<{ filename?: string; lastModified?: string; last_modified?: string }> }>(request);
-        const files = (body.files ?? []).flatMap((file) => {
-          if (!file.filename) {
-            return [];
-          }
-          return [{ filename: file.filename, lastModified: file.lastModified ?? file.last_modified }];
-        });
-        return Response.json(await catalog.replaceFileInventory(files));
-      }
-      if (request.method === "GET") {
-        return Response.json(await catalog.listFileInventory());
-      }
-    }
     if (request.method === "GET" && segments[3] === "stats") {
       const catalog = env.QUACK_CATALOGS.getByName(`catalog:${catalogId}`) as unknown as {
         stats(): Promise<Record<string, number>>;

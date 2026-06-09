@@ -1,6 +1,5 @@
 import { LogicalTypes } from "./quack-imports";
 import type { LogicalType, QuackValue } from "./quack-imports";
-import type { ListedFile } from "./file-listing";
 import { quackValueFromSql } from "./quack-values";
 import { quoteIdentifier } from "./sql-text";
 import {
@@ -18,7 +17,6 @@ export interface DuckLakeMetadataContext {
   tableExists(tableName: string): boolean;
   tableRowCount(tableName: string): number;
   bumpTableVersion(tableName: string): void;
-  listFiles(pattern: string): Promise<ListedFile[]>;
 }
 
 interface DuckLakeTagValue {
@@ -112,9 +110,6 @@ export class DuckLakeMetadataCompat {
     if (!/^(?:SELECT|WITH)\b/i.test(statement.trim())) {
       return undefined;
     }
-    if (/\bFROM\s+read_blob\s*\(/i.test(statement)) {
-      return this.duckLakeReadBlob(statement);
-    }
     const missingInlinedDelete = this.duckLakeMissingInlinedDeleteQuery(statement);
     if (missingInlinedDelete) {
       return missingInlinedDelete;
@@ -204,84 +199,6 @@ export class DuckLakeMetadataCompat {
       );
     }
     return undefined;
-  }
-
-  private async duckLakeReadBlob(statement: string): Promise<QueryResultData> {
-    const names = ["filename"];
-    const types = [LogicalTypes.varchar()];
-    const pattern = readBlobPattern(statement);
-    if (!pattern) {
-      return emptyResult(names, types);
-    }
-    const files = (await this.context.listFiles(pattern))
-      .filter((file) => !/\bsuffix\s*\(\s*filename\s*,\s*'\.parquet'\s*\)/i.test(statement) || file.filename.endsWith(".parquet"))
-      .filter((file) => matchesLastModifiedFilter(file, statement));
-    const knownFiles = /\bNOT\s+IN\s*\(/i.test(statement) ? this.duckLakeKnownFiles(statement, pattern) : new Set<string>();
-    const rows = files
-      .filter((file) => !knownFiles.has(normalizePath(file.filename)))
-      .map((file) => [file.filename]);
-    return { names, types, rows };
-  }
-
-  private duckLakeKnownFiles(statement: string, pattern: string): Set<string> {
-    const dataPath = dataPathFromReadBlobPattern(pattern);
-    const schemaName =
-      metadataSchemaName(statement, "ducklake_data_file") ??
-      metadataSchemaName(statement, "ducklake_delete_file") ??
-      metadataSchemaName(statement, "ducklake_files_scheduled_for_deletion") ??
-      "main";
-    const known = new Set<string>();
-    const schemaTable = normalizeTableName(`${schemaName}.ducklake_schema`);
-    const tableTable = normalizeTableName(`${schemaName}.ducklake_table`);
-    const dataFileTable = normalizeTableName(`${schemaName}.ducklake_data_file`);
-    const deleteFileTable = normalizeTableName(`${schemaName}.ducklake_delete_file`);
-    if (this.tableExists(schemaTable) && this.tableExists(tableTable)) {
-      for (const fileTable of [dataFileTable, deleteFileTable]) {
-        if (!this.tableExists(fileTable)) {
-          continue;
-        }
-        const rows = this.sql
-          .exec<{
-            schema_path: string | null;
-            table_path: string | null;
-            file_path: string | null;
-            schema_relative: number | null;
-            table_relative: number | null;
-            file_relative: number | null;
-          }>(
-            `SELECT s.path AS schema_path,
-                    t.path AS table_path,
-                    f.path AS file_path,
-                    s.path_is_relative AS schema_relative,
-                    t.path_is_relative AS table_relative,
-                    f.path_is_relative AS file_relative
-             FROM ${quoteIdentifier(fileTable)} f
-             JOIN ${quoteIdentifier(tableTable)} t ON f.table_id = t.table_id
-             JOIN ${quoteIdentifier(schemaTable)} s ON t.schema_id = s.schema_id`
-          )
-          .toArray();
-        for (const row of rows) {
-          const path = duckLakeFullFilePath(dataPath, row);
-          if (path) {
-            known.add(normalizePath(path));
-          }
-        }
-      }
-    }
-    const scheduledTable = normalizeTableName(`${schemaName}.ducklake_files_scheduled_for_deletion`);
-    if (this.tableExists(scheduledTable)) {
-      for (const row of this.sql
-        .exec<{ path: string | null; path_is_relative: number | null }>(
-          `SELECT path, path_is_relative FROM ${quoteIdentifier(scheduledTable)}`
-        )
-        .toArray()) {
-        if (!row.path) {
-          continue;
-        }
-        known.add(normalizePath(isTruthy(row.path_is_relative) ? joinPath(dataPath, row.path) : row.path));
-      }
-    }
-    return known;
   }
 
   private tryDuckLakeMetadataMutation(statement: string): QueryResultData | undefined {
@@ -1078,84 +995,4 @@ export class DuckLakeMetadataCompat {
     }
     return paramsByImpl;
   }
-}
-
-function readBlobPattern(statement: string): string | undefined {
-  const match = statement.match(/\bread_blob\s*\(\s*'((?:''|[^'])*)'\s*(?:\|\|\s*'((?:''|[^'])*)')?\s*\)/i);
-  if (!match?.[1]) {
-    return undefined;
-  }
-  return sqlStringValue(match[1]) + sqlStringValue(match[2] ?? "");
-}
-
-function sqlStringValue(value: string): string {
-  return value.replaceAll("''", "'");
-}
-
-function dataPathFromReadBlobPattern(pattern: string): string {
-  return pattern.endsWith("**") ? pattern.slice(0, -2) : pattern;
-}
-
-function matchesLastModifiedFilter(file: ListedFile, statement: string): boolean {
-  const olderThan = statement.match(/\blast_modified\s*<\s*'([^']+)'/i)?.[1];
-  if (!olderThan) {
-    return true;
-  }
-  if (!file.lastModified) {
-    return false;
-  }
-  const fileTime = Date.parse(file.lastModified);
-  const threshold = Date.parse(olderThan);
-  return Number.isFinite(fileTime) && Number.isFinite(threshold) && fileTime < threshold;
-}
-
-function duckLakeFullFilePath(
-  dataPath: string,
-  row: {
-    schema_path: string | null;
-    table_path: string | null;
-    file_path: string | null;
-    schema_relative: number | boolean | null;
-    table_relative: number | boolean | null;
-    file_relative: number | boolean | null;
-  }
-): string | undefined {
-  const filePath = row.file_path;
-  if (!filePath) {
-    return undefined;
-  }
-  if (!isTruthy(row.file_relative)) {
-    return filePath;
-  }
-  const tablePath = row.table_path ?? "";
-  if (!isTruthy(row.table_relative)) {
-    return joinPath(tablePath, filePath);
-  }
-  const schemaPath = row.schema_path ?? "";
-  if (!isTruthy(row.schema_relative)) {
-    return joinPath(schemaPath, tablePath, filePath);
-  }
-  return joinPath(dataPath, schemaPath, tablePath, filePath);
-}
-
-function joinPath(...parts: string[]): string {
-  return parts
-    .filter((part) => part.length > 0)
-    .reduce((joined, part) => {
-      if (!joined) {
-        return part;
-      }
-      if (joined.endsWith("/") || part.startsWith("/")) {
-        return `${joined}${part}`;
-      }
-      return `${joined}/${part}`;
-    }, "");
-}
-
-function normalizePath(path: string): string {
-  return path.replaceAll("\\", "/");
-}
-
-function isTruthy(value: number | boolean | null): boolean {
-  return value === true || value === 1;
 }
