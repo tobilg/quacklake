@@ -504,6 +504,7 @@ Cognito notes:
 The repository includes two helper scripts for a Cognito-backed OIDC setup:
 
 - `scripts/setup-cognito.sh`: uses the AWS CLI to create or reuse Cognito resources.
+- `scripts/setup-cognito-user.sh`: uses the AWS CLI to create/update one user and add or remove that user from one Cognito group.
 - `scripts/register-cognito-idp.sh`: calls the quacklake Admin API to register that Cognito user pool, map Cognito groups to a catalog, and install generated policy rules.
 
 For a full operator walkthrough with permission profiles, row and column policy examples, and end-user DuckLake queries, see [Cognito End-To-End Guide](./cognito-e2e.md).
@@ -555,7 +556,7 @@ The output file is not a secret by itself. It contains identifiers that the regi
 }
 ```
 
-For a quick smoke test, also create a permanent-password test user:
+For a quick smoke test while creating the pool, `scripts/setup-cognito.sh` can also create a permanent-password test user:
 
 ```sh
 scripts/setup-cognito.sh \
@@ -568,6 +569,28 @@ scripts/setup-cognito.sh \
 ```
 
 Use `--test-user-group admins` for an admin test user, or `--test-user-group both` for a user that should match both generated quacklake rules. For production, create users and group membership through your normal IAM/IaC workflow instead of committing usernames or passwords to scripts.
+
+To add or remove users later without changing pool, client, or provider setup, use the focused user helper:
+
+```sh
+scripts/setup-cognito-user.sh \
+  --region us-east-1 \
+  --user-pool-id us-east-1_EXAMPLE \
+  --username reader@example.com \
+  --password 'ChangeMe123!' \
+  --group quacklake-readers
+```
+
+Remove a user from a group without deleting the user:
+
+```sh
+scripts/setup-cognito-user.sh \
+  --region us-east-1 \
+  --user-pool-id us-east-1_EXAMPLE \
+  --username reader@example.com \
+  --group quacklake-readers \
+  --action delete
+```
 
 To reuse an existing pool instead of creating a new one:
 

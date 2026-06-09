@@ -130,70 +130,51 @@ If a group already exists, the AWS CLI returns an error. That is safe; skip that
 
 ## 3. Create Users And Assign Profiles
 
-Create a reader:
+Create or update a reader and add the user to `finance-readers`:
 
 ```sh
-aws cognito-idp admin-create-user \
-  --region "$AWS_REGION" \
-  --user-pool-id "$USER_POOL_ID" \
-  --username reader@example.com \
-  --user-attributes Name=email,Value=reader@example.com Name=email_verified,Value=true \
-  --message-action SUPPRESS \
-  --temporary-password 'ChangeMe123!'
-
-aws cognito-idp admin-set-user-password \
+scripts/setup-cognito-user.sh \
   --region "$AWS_REGION" \
   --user-pool-id "$USER_POOL_ID" \
   --username reader@example.com \
   --password 'ChangeMe123!' \
-  --permanent
-
-aws cognito-idp admin-add-user-to-group \
-  --region "$AWS_REGION" \
-  --user-pool-id "$USER_POOL_ID" \
-  --username reader@example.com \
-  --group-name finance-readers
+  --group finance-readers
 ```
 
 Create a tenant-scoped user with `custom:tenant_id`:
 
 ```sh
-aws cognito-idp admin-create-user \
-  --region "$AWS_REGION" \
-  --user-pool-id "$USER_POOL_ID" \
-  --username tenant-a@example.com \
-  --user-attributes \
-    Name=email,Value=tenant-a@example.com \
-    Name=email_verified,Value=true \
-    Name=custom:tenant_id,Value=tenant-a \
-  --message-action SUPPRESS \
-  --temporary-password 'ChangeMe123!'
-
-aws cognito-idp admin-set-user-password \
+scripts/setup-cognito-user.sh \
   --region "$AWS_REGION" \
   --user-pool-id "$USER_POOL_ID" \
   --username tenant-a@example.com \
   --password 'ChangeMe123!' \
-  --permanent
-
-aws cognito-idp admin-add-user-to-group \
-  --region "$AWS_REGION" \
-  --user-pool-id "$USER_POOL_ID" \
-  --username tenant-a@example.com \
-  --group-name finance-tenant-users
+  --tenant-id tenant-a \
+  --group finance-tenant-users
 ```
 
-Update an existing user's tenant claim:
+Move a user into an additional profile group:
 
 ```sh
-aws cognito-idp admin-update-user-attributes \
+scripts/setup-cognito-user.sh \
   --region "$AWS_REGION" \
   --user-pool-id "$USER_POOL_ID" \
   --username tenant-a@example.com \
-  --user-attributes Name=custom:tenant_id,Value=tenant-a
+  --group finance-analysts
 ```
 
-Add or remove groups as users change roles. The user must get a fresh token before quacklake sees changed group membership or custom attributes.
+Remove a user from a profile group without deleting the user:
+
+```sh
+scripts/setup-cognito-user.sh \
+  --region "$AWS_REGION" \
+  --user-pool-id "$USER_POOL_ID" \
+  --username tenant-a@example.com \
+  --group finance-analysts \
+  --action delete
+```
+
+`scripts/setup-cognito-user.sh` does not create user pools, app clients, or groups. It only creates or updates a named user, sets a permanent password when provided, optionally sets `custom:tenant_id`, and adds or removes the user from one group. The user must get a fresh token before quacklake sees changed group membership or custom attributes.
 
 ## 4. Register Cognito With quacklake
 
