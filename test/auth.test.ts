@@ -44,6 +44,73 @@ interface OpenApiOperation {
 }
 
 describe("JWT authentication and catalog authorization", () => {
+  it("lists catalogs and reports statistics from the SQLite catalog object", async () => {
+    const created = await createCatalog("stats");
+    await putPolicy(created.catalog.catalogId, { version: 1, defaultEffect: "allow", rules: [] });
+    const client = await connectWith(created.jwt);
+    try {
+      await client.query("CREATE TABLE items (id INTEGER)");
+      await client.query("INSERT INTO items VALUES (1), (2)");
+      const listed = await SELF.fetch("http://example.com/admin/catalogs", { headers: adminHeaders });
+      expect(listed.status).toBe(200);
+      await expect(listed.json()).resolves.toMatchObject({
+        catalogs: expect.arrayContaining([expect.objectContaining(created.catalog)])
+      });
+      const stats = await SELF.fetch(`http://example.com/admin/catalogs/${created.catalog.catalogId}/stats`, { headers: adminHeaders });
+      expect(stats.status).toBe(200);
+      await expect(stats.json()).resolves.toMatchObject({ tables: 1, sessions: 1, results: 1 });
+    } finally {
+      await client.disconnect();
+    }
+  });
+
+  it("validates absolute credential expiry and issues credentials with that expiry", async () => {
+    const created = await createCatalog("expiry");
+    for (const expiresAt of ["not-a-date", "2000-01-01T00:00:00.000Z"]) {
+      await expectAdminError(`http://example.com/admin/catalogs/${created.catalog.catalogId}/credentials`,
+        { expiresAt }, 400, /expiresAt must be a future ISO timestamp/);
+    }
+    const expiresAt = new Date(Date.now() + 3600_000).toISOString();
+    const response = await SELF.fetch(`http://example.com/admin/catalogs/${created.catalog.catalogId}/credentials`, {
+      method: "POST", headers: adminHeaders, body: JSON.stringify({ expiresAt })
+    });
+    expect(response.status).toBe(201);
+    await expect(response.json()).resolves.toMatchObject({ credential: { expiresAt } });
+  });
+
+  it("explains authentication failures and rejects a requested catalog that differs from the JWT", async () => {
+    const created = await createCatalog("explain_identity");
+    await expect(explain("not-a-jwt", created.catalog.catalogId, "SELECT 1")).resolves.toMatchObject({
+      allowed: false, reason: "authentication denied", principal: null, requiredActions: []
+    });
+    await expect(explain(created.jwt, "another_catalog", "SELECT 1")).resolves.toMatchObject({
+      allowed: false, reason: "resolved catalog does not match requested catalog",
+      catalog: { catalogId: created.catalog.catalogId }, requiredActions: []
+    });
+  });
+
+  it("rejects lease scope overrides and invalid options, and authenticates before issuing a lease", async () => {
+    const created = await createCatalog("lease_validation", { dataAccessMode: "trusted_client" });
+    for (const [body, error] of [
+      [{ dataPath: "r2://another/catalog/" }, "dataPath is not accepted"],
+      [{ ttlSeconds: 3600 }, "ttlSeconds is not accepted"],
+      [{ extra: true }, "extra is not accepted"],
+      [{ access: "admin" }, "access must be read or read_write"],
+      [{ reason: "export" }, "reason must be attach, prepare, execute, or refresh"]
+    ] as const) {
+      const response = await SELF.fetch("http://example.com/catalog/data-lease", {
+        method: "POST", headers: { Authorization: `Bearer ${created.jwt}` }, body: JSON.stringify(body)
+      });
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toMatchObject({ error: expect.stringContaining(error) });
+    }
+    const response = await SELF.fetch("http://example.com/catalog/data-lease", {
+      method: "POST", headers: { Authorization: "Bearer invalid-jwt" }
+    });
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toEqual({ error: "authentication denied" });
+  });
+
   it("requires admin bearer auth for admin routes while leaving api docs public", async () => {
     const docs = await SELF.fetch("http://example.com/api-docs");
     expect(docs.status).toBe(200);
@@ -866,6 +933,8 @@ describe("JWT authentication and catalog authorization", () => {
     await putPolicy(created.catalog.catalogId, { version: 1, defaultEffect: "allow", rules: [] });
     const client = await connectWith(created.jwt);
     try {
+      await client.query("CREATE TABLE fetched_types (big BIGINT, payload BLOB)");
+      await client.query("INSERT INTO fetched_types VALUES (42, X'0001ff')");
       const connectionId = (client as unknown as { connectionId: string }).connectionId;
       const first = await client.send({
         type: MessageType.PREPARE_REQUEST,
@@ -876,7 +945,7 @@ describe("JWT authentication and catalog authorization", () => {
             UNION ALL
             SELECT n + 1 FROM numbers WHERE n < 13000
           )
-          SELECT n FROM numbers
+          SELECT n, big, payload FROM numbers CROSS JOIN fetched_types
         `
       });
       expect(first.type).toBe(MessageType.PREPARE_RESPONSE);
@@ -898,6 +967,10 @@ describe("JWT authentication and catalog authorization", () => {
       }
       expect(fetched.results.reduce((total, chunk) => total + chunk.rowCount, 0)).toBe(13000 - 12 * 1024);
       expect(fetched.batchIndex).toBe(2n);
+      // Fetch reloads chunks persisted in SQLite; bigint and binary values must
+      // survive both storage serialization and the Quack wire round trip.
+      expect(fetched.results[0]?.columns[1]?.values[0]).toBe(42n);
+      expect(fetched.results[0]?.columns[2]?.values[0]).toEqual(new Uint8Array([0, 1, 255]));
 
       await client.send({
         type: MessageType.PREPARE_REQUEST,

@@ -8,6 +8,8 @@ export default defineConfig({
   plugins: [
     polyglotSqlSdkWorkersPlugin(),
     cloudflareTest({
+      // Execute and instrument current source without requiring a Worker build.
+      main: "./src/index.ts",
       wrangler: { configPath: "./wrangler.example.jsonc" },
       miniflare: {
         bindings: {

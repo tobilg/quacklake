@@ -69,6 +69,19 @@ describe("file listing helpers", () => {
     expect(() => selectConfiguredR2Bucket({ DUCKLAKE_R2_BINDINGS: JSON.stringify({ lake: "MISSING" }) } as RuntimeEnv)).toThrow(/missing Worker R2 binding/i);
     expect(listConfiguredR2Buckets({} as RuntimeEnv)).toEqual([]);
   });
+
+  it("rejects empty bucket selection and catalogs without configured buckets", () => {
+    for (const name of ["", "  ", null, 7]) {
+      expect(() => selectConfiguredR2Bucket({} as RuntimeEnv, name as string)).toThrow("r2Bucket must be a configured bucket name");
+    }
+    expect(() => selectConfiguredR2Bucket({} as RuntimeEnv)).toThrow("must configure at least one R2 bucket");
+    expect(parseR2BindingMap("null")).toEqual({});
+    expect(parseR2BindingMap('"bucket"')).toEqual({});
+    expect(objectStoreLocationFromUri("R2://lake")).toEqual({ scheme: "r2", bucket: "lake", key: "" });
+    expect(r2BindingHint("lake", {
+      bucketName: "lake", bindingName: "ARCHIVE_R2", configuredBindings: { lake: "ARCHIVE_R2" }
+    })).toContain('{"lake":"ARCHIVE_R2"}');
+  });
 });
 
 function fakeR2Bucket(keys: string[]): R2Bucket {

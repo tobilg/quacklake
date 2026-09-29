@@ -12,7 +12,7 @@ This guide covers local setup, Worker configuration, secrets, development comman
 Install dependencies:
 
 ```sh
-pnpm install
+pnpm install --frozen-lockfile
 ```
 
 Run checks:
@@ -22,6 +22,11 @@ pnpm run typecheck
 pnpm run test
 pnpm run test:coverage
 ```
+
+Tests load `src/index.ts` directly, so they do not require a Worker build. Vitest and
+`@vitest/coverage-istanbul` are pinned to the same version supported by
+`@cloudflare/vitest-pool-workers`; check the pool's peer dependencies before
+upgrading either package.
 
 Build a Worker dry run:
 

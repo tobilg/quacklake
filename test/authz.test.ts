@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Schema } from "@polyglot-sql/sdk";
-import type { AuthPrincipal, CatalogAuthPolicy } from "../src/auth";
+import type { AuthPrincipal, CatalogAuthPolicy, PrincipalMatch } from "../src/auth";
 import { classifyAppend, classifySqlText, evaluatePolicy, principalMatches } from "../src/authz";
 
 const principal: AuthPrincipal = {
@@ -44,6 +44,98 @@ const financeSchema: Schema = {
 };
 
 describe("SQL authorization classifier", () => {
+  it("classifies schema removal and fully qualified column reads", () => {
+    expect(classifySqlText("DROP SCHEMA finance")[0]).toMatchObject({
+      confident: true, requiredActions: [{ action: "schema.drop", resource: { schema: "finance" } }]
+    });
+    for (const sql of [
+      "SELECT finance.invoices.id FROM finance.invoices",
+      "SELECT i.id FROM warehouse.finance.invoices i"
+    ]) {
+      expect(classifySqlText(sql, financeSchema)[0]).toMatchObject({
+        confident: true,
+        requiredActions: expect.arrayContaining([
+          { action: "table.read", resource: { schema: "finance", table: "invoices" } },
+          { action: "column.read", resource: { schema: "finance", table: "invoices", column: "id" } }
+        ])
+      });
+    }
+  });
+
+  it.each([
+    ["SELECT * FROM finance.missing", "Unknown source table finance.missing"],
+    ["WITH x AS (SELECT * FROM finance.missing) SELECT * FROM x", "Unknown source table finance.missing"],
+    ["SELECT * FROM (SELECT * FROM finance.missing) x", "Unknown source table finance.missing"],
+    ["SELECT x.* FROM finance.invoices", "Unknown star qualifier x"],
+    ["SELECT x.id FROM finance.invoices", "Unknown column qualifier x"],
+    ["SELECT i.missing FROM finance.invoices i", "Unknown projected column i.missing"],
+    ["SELECT id FROM finance.invoices UNION SELECT id FROM finance.missing", "Unknown source table finance.missing"],
+    ["CREATE TABLE finance.copy AS SELECT id FROM finance.missing", "Unknown source table finance.missing"],
+    ["INSERT INTO finance.invoices SELECT id FROM finance.missing", "Unknown source table finance.missing"],
+    ["SELECT s.id + 1 FROM (SELECT id FROM finance.invoices) s", "Unable to resolve derived column s.id"],
+    ["SELECT id + 1 FROM (SELECT id FROM finance.invoices) s", "Unable to resolve derived column id"]
+  ])("denies unresolved SQL even under a default-allow policy: %s", (sql, reason) => {
+    const statements = classifySqlText(sql, financeSchema);
+    expect(statements[0]).toMatchObject({ confident: false, reason });
+    expect(evaluatePolicy(principal, { version: 1, defaultEffect: "allow", rules: [] }, statements))
+      .toMatchObject({ allowed: false, reason });
+  });
+
+  it("reports parse errors and does not classify empty input as a permission request", () => {
+    const statements = classifySqlText("SELECT (", financeSchema);
+    expect(statements[0]).toMatchObject({ confident: false, reason: expect.stringContaining("SQL parse error") });
+    expect(classifySqlText(" ; \n ; ")).toEqual([]);
+  });
+
+  it("resolves schema names embedded in table names and the default schema", () => {
+    for (const [name, sql] of [
+      ["finance.invoices", "SELECT id FROM finance.invoices"],
+      ["invoices", "SELECT id FROM invoices"]
+    ] as const) {
+      const schema: Schema = { tables: [{ name, columns: [{ name: "id", type: "INTEGER" }] }] };
+      expect(classifySqlText(sql, schema)[0]).toMatchObject({ confident: true });
+      expect(classifySqlText(sql.replace("SELECT id", "SELECT absent"), schema)[0])
+        .toMatchObject({ confident: false, reason: "Unknown projected column absent" });
+    }
+  });
+
+  it("traces derived aliases and set operations back to source columns", () => {
+    for (const sql of [
+      "SELECT s.id FROM (SELECT id FROM finance.invoices) s",
+      "WITH s AS (SELECT id FROM finance.invoices) SELECT s.id FROM s",
+      "SELECT id FROM finance.invoices INTERSECT SELECT id FROM finance.customers",
+      "SELECT id FROM finance.invoices EXCEPT SELECT id FROM finance.customers"
+    ]) {
+      expect(classifySqlText(sql, financeSchema)[0]).toMatchObject({
+        confident: true,
+        requiredActions: expect.arrayContaining([
+          { action: "column.read", resource: { schema: "finance", table: "invoices", column: "id" } }
+        ])
+      });
+    }
+    expect(classifySqlText("SELECT 1 AS constant, i.id FROM finance.invoices i JOIN (SELECT id FROM finance.customers) c ON c.id = i.id", financeSchema)[0])
+      .toMatchObject({ confident: true });
+    expect(classifySqlText("SELECT name FROM sqlite_master")[0]).toMatchObject({ confident: true, requiredActions: [] });
+    expect(classifySqlText("SELECT i.id, m.value FROM finance.invoices i CROSS JOIN ducklake_metadata m", financeSchema)[0])
+      .toMatchObject({
+        confident: true,
+        requiredActions: [
+          { action: "table.read", resource: { schema: "finance", table: "invoices" } },
+          { action: "table.read", resource: { schema: "main", table: "ducklake_metadata" } },
+          { action: "column.read", resource: { schema: "finance", table: "invoices", column: "id" } }
+        ]
+      });
+  });
+
+  it("maps information-schema column and other metadata reads to catalog permissions", () => {
+    expect(classifySqlText("SELECT column_name FROM information_schema.columns", financeSchema)[0]).toMatchObject({
+      confident: true, requiredActions: [{ action: "column.read", resource: { schema: "*", table: "*", column: "*" } }]
+    });
+    expect(classifySqlText("SELECT * FROM information_schema.referential_constraints", financeSchema)[0]).toMatchObject({
+      confident: true, requiredActions: [{ action: "schema.read", resource: { schema: "*" } }]
+    });
+  });
+
   it("classifies aliases, joins, aggregates, stars, and CTE source tables", () => {
     expect(classifySqlText(`
       SELECT i.id, c.name
@@ -202,6 +294,51 @@ describe("SQL authorization classifier", () => {
 });
 
 describe("catalog policy evaluator", () => {
+  it.each<PrincipalMatch>([
+    { subjectsAny: ["other"] }, { issuersAny: ["other"] },
+    { scopesAny: ["other"] }, { scopesAll: ["catalog.admin", "other"] },
+    { groupsAny: ["other"] }, { groupsAll: ["finance-readers", "other"] },
+    { rolesAny: ["other"] }, { rolesAll: ["analyst", "other"] },
+    { claims: { department: "other" } }
+  ])("rejects a principal that does not satisfy a match dimension: %j", (match) => {
+    expect(principalMatches(principal, match)).toBe(false);
+  });
+
+  it("distinguishes unrestricted, wildcard, and explicit column resources", () => {
+    expect(principalMatches(principal, undefined)).toBe(true);
+    const read = classifySqlText("SELECT id FROM finance.invoices");
+    for (const resource of [undefined, {}, { schema: "finance" }, { table: "invoices", columns: ["id"] }, { columns: ["*"] }]) {
+      const decision = evaluatePolicy(principal, {
+        version: 1, defaultEffect: "deny", rules: [{ effect: "allow", actions: ["*"], resource }]
+      }, read);
+      expect(decision).toMatchObject({ allowed: true, matchedRules: [{ ruleId: "rule-0", effect: "allow" }] });
+    }
+    for (const resource of [{ schema: "other" }, { table: "other" }, { columns: ["secret"] }, { column: "secret" }]) {
+      expect(evaluatePolicy(principal, {
+        version: 1, defaultEffect: "deny", rules: [{ effect: "allow", actions: ["*"], resource }]
+      }, read).allowed).toBe(false);
+    }
+    expect(evaluatePolicy(principal, { version: 1, defaultEffect: "deny", rules: [] }, classifySqlText("BEGIN")))
+      .toMatchObject({ allowed: true, reason: "no catalog permissions required" });
+  });
+
+  it("ignores rules for other principals and retains deny precedence without explicit rule IDs", () => {
+    const read = classifySqlText("SELECT id FROM finance.invoices");
+    expect(evaluatePolicy(principal, {
+      version: 1, defaultEffect: "deny", rules: [
+        { effect: "deny", actions: ["*"], principal: { subjectsAny: ["other"] } },
+        { effect: "allow", actions: ["*"], principal: { subjectsAny: ["other"] } },
+        { effect: "allow", actions: ["*"], rowPredicate: "tenant_id = ${claims.tenantId}" }
+      ]
+    }, read)).toMatchObject({ allowed: true, matchedRules: [{ ruleId: "rule-2", effect: "allow" }] });
+    expect(evaluatePolicy(principal, {
+      version: 1, defaultEffect: "allow", rules: [{ effect: "deny", actions: ["*"], resource: { schema: "finance" } }]
+    }, read)).toMatchObject({ allowed: false, matchedRules: [{ ruleId: "rule-0", effect: "deny" }] });
+    expect(evaluatePolicy(principal, { version: 1, defaultEffect: "allow", rules: [] }, [
+      { sql: "unknown", confident: false, requiredActions: [] }
+    ])).toMatchObject({ allowed: false, reason: "SQL statement could not be classified confidently" });
+  });
+
   it("denies missing policies and unclassified SQL even when a policy would otherwise allow by default", () => {
     const read = classifySqlText("SELECT id FROM finance.invoices");
     expect(evaluatePolicy(principal, undefined, read)).toMatchObject({
