@@ -1,3 +1,46 @@
+// Significant tokens with source offsets, so targeted rewrites can retain the
+// original whitespace, comments, strings, and quoted identifiers byte for byte.
+export function sqlTokens(sql: string): { text: string; start: number; end: number }[] {
+  const tokens: { text: string; start: number; end: number }[] = [];
+  let index = 0;
+  while (index < sql.length) {
+    const start = index;
+    const char = sql[index]!;
+    if (/\s/.test(char)) {
+      index++;
+      continue;
+    }
+    if (sql.startsWith("--", index)) {
+      while (index < sql.length && !/[\r\n]/.test(sql[index]!)) index++;
+      continue;
+    }
+    if (sql.startsWith("/*", index)) {
+      const end = sql.indexOf("*/", index + 2);
+      index = end < 0 ? sql.length : end + 2;
+      continue;
+    }
+    if (char === "'" || char === '"' || char === "`" || char === "[") {
+      const closing = char === "[" ? "]" : char;
+      index++;
+      while (index < sql.length) {
+        if (sql[index++] === closing) {
+          if (char !== "[" && sql[index] === closing) {
+            index++;
+          } else {
+            break;
+          }
+        }
+      }
+    } else if (/[A-Za-z0-9_$]/.test(char)) {
+      while (/[A-Za-z0-9_$]/.test(sql[index] ?? "")) index++;
+    } else {
+      index++;
+    }
+    tokens.push({ text: sql.slice(start, index), start, end: index });
+  }
+  return tokens;
+}
+
 export function splitSqlStatements(sql: string): string[] {
   const statements: string[] = [];
   let current = "";

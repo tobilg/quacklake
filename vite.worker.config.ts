@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
-import { polyglotSqlSdkWorkersPlugin } from "./vite-plugin-polyglot-sql-sdk";
+import { polyglotSqlSdkWorkersPlugin } from "./vite-plugin-polyglot-sql-sdk.ts";
 
 const root = fileURLToPath(new URL(".", import.meta.url));
 

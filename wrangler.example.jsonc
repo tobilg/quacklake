@@ -5,7 +5,8 @@
   "compatibility_date": "2026-06-09",
   "compatibility_flags": ["nodejs_compat"],
   "no_bundle": true,
-  "find_additional_modules": false,
+  // Include the Wasm asset emitted alongside the custom-built Worker.
+  "find_additional_modules": true,
   "rules": [
     {
       "type": "CompiledWasm",

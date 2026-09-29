@@ -71,6 +71,38 @@ async function putPermissivePolicy(catalogId: string): Promise<void> {
 }
 
 describe("durable Quack Worker", () => {
+  it("round-trips UUID CAST writes through SQLite and the Quack protocol", async () => {
+    const client = await createCatalogClient("uuid_cast");
+    const uuids = [
+      "aabbccdd-eeff-4011-8233-445566778899",
+      "12345678-4455-4677-8899-aabbccddeeff",
+      "00112233-4455-6677-8899-aabbccddeeff",
+      null
+    ];
+    try {
+      await client.query("CREATE TABLE uuid_values (id INTEGER, value UUID)");
+      for (const [id, uuid] of uuids.entries()) {
+        await client.query(`INSERT INTO uuid_values VALUES (${id}, CAST(${uuid === null ? "NULL" : sqlStringLiteral(uuid)} AS UUID))`);
+      }
+      const result = await client.query("SELECT value FROM uuid_values ORDER BY id");
+      expect(result.types.map((type) => type.id)).toEqual([LogicalTypeId.UUID]);
+      expect(result.rows()).toEqual(uuids.map((value) => ({ value })));
+      expect(await client.values<string>("SELECT typeof(value) AS storage_type FROM uuid_values ORDER BY id")).toEqual([
+        "text", "text", "text", "null"
+      ]);
+      expect(await client.values<string>("SELECT CAST(('00112233-4455-6677-8899-aabbccddeeff') AS /* type */ UUID)")).toEqual([uuids[2]]);
+      expect((await client.query("SELECT 'CAST(x AS UUID)' AS UUID, CAST(NULL AS UUID) AS null_uuid")).rows()).toEqual([
+        { UUID: "CAST(x AS UUID)", null_uuid: null }
+      ]);
+
+      // Existing corrupt numeric data must still fail UUID wire encoding.
+      await client.query("INSERT INTO uuid_values VALUES (4, 0)");
+      await expect(client.query("SELECT value FROM uuid_values WHERE id = 4")).rejects.toThrow("400 Bad Request");
+    } finally {
+      await client.disconnect();
+    }
+  });
+
   it("keeps catalog creation distinct from adding another JWT credential", async () => {
     const catalogId = `routing_${crypto.randomUUID().replaceAll("-", "_")}`;
     const create = await SELF.fetch("http://example.com/admin/catalogs", {

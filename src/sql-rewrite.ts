@@ -1,6 +1,6 @@
 import { LogicalTypeId } from "./quack-imports";
 import { logicalTypeFromDuckDbType, sqliteTypeForLogicalType } from "./quack-values";
-import { quoteIdentifier, removeDuckDbCasts, splitTopLevel, sqlString, unquoteIdentifier } from "./sql-text";
+import { quoteIdentifier, removeDuckDbCasts, splitTopLevel, sqlString, sqlTokens, unquoteIdentifier } from "./sql-text";
 import { identifierParts, normalizeTableName } from "./sql-names";
 import type { ColumnInfo, ParsedColumnInfo } from "./sql-types";
 
@@ -11,6 +11,7 @@ export function rewriteDuckDbSql(
   let rewritten = statement.trim();
   rewritten = rewritten.replace(/^CREATE\s+TEMP(?:ORARY)?\s+TABLE\b/i, "CREATE TABLE");
   rewritten = replaceFunctions(rewritten);
+  rewritten = rewriteUuidCasts(rewritten);
   rewritten = removeDuckDbCasts(rewritten);
   rewritten = stripOrderByAll(rewritten);
   rewritten = rewriteHashOrderByOrdinals(rewritten);
@@ -24,6 +25,33 @@ export function rewriteDuckDbSql(
   rewritten = rewritten.replace(/\bAS\s+BIGINT\b/gi, "AS INTEGER");
   rewritten = rewriteQualifiedNames(rewritten, options.shouldRewriteQualifiedName);
   return rewritten;
+}
+
+function rewriteUuidCasts(sqlText: string): string {
+  const tokens = sqlTokens(sqlText);
+  const parentheses: number[] = [];
+  let result = "";
+  let copiedThrough = 0;
+  for (const [index, token] of tokens.entries()) {
+    if (token.text === "(") {
+      parentheses.push(index);
+    } else if (token.text === ")") {
+      const open = parentheses.pop();
+      const type = tokens[index - 1];
+      if (
+        open !== undefined && index - open >= 4 &&
+        tokens[open - 1]?.text.toUpperCase() === "CAST" &&
+        tokens[index - 2]?.text.toUpperCase() === "AS" &&
+        type?.text.toUpperCase() === "UUID"
+      ) {
+        // UUID has numeric affinity in SQLite casts. Only change the execution
+        // type; declared UUID columns retain their tracked Quack logical type.
+        result += sqlText.slice(copiedThrough, type.start) + "TEXT";
+        copiedThrough = type.end;
+      }
+    }
+  }
+  return result + sqlText.slice(copiedThrough);
 }
 
 export function duckDbTypeName(column: ColumnInfo): string {

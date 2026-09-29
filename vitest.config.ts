@@ -1,6 +1,6 @@
 import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
 import { defineConfig } from "vitest/config";
-import { polyglotSqlSdkWorkersPlugin } from "./vite-plugin-polyglot-sql-sdk";
+import { polyglotSqlSdkWorkersPlugin } from "./vite-plugin-polyglot-sql-sdk.ts";
 
 const testR2BucketName = process.env.R2_BUCKET ?? "test-ducklake-r2";
 

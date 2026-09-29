@@ -17,6 +17,7 @@ const sdkWasm = resolveSdkWasm(sdkDist);
 export function polyglotSqlSdkWorkersPlugin(options: PolyglotSqlSdkWorkersPluginOptions = {}): Plugin {
   const { workerBuild = false, wasmFileName = basename(sdkWasm) } = options;
   let config: ResolvedConfig | undefined;
+  let transformedWasm = false;
 
   return {
     name: "polyglot-sql-sdk-workers",
@@ -26,7 +27,16 @@ export function polyglotSqlSdkWorkersPlugin(options: PolyglotSqlSdkWorkersPlugin
       config = resolved;
     },
 
+    buildStart() {
+      transformedWasm = false;
+    },
+
     resolveId(id) {
+      // Use the browser entry in Workers, including tests. The Node entry can
+      // install a filesystem-backed fetch shim for loading the Wasm asset.
+      if (id === "@polyglot-sql/sdk") {
+        return sdkEntry;
+      }
       if (workerBuild && id === wasmModuleId) {
         return { id: `./${wasmFileName}`, external: true };
       }
@@ -34,12 +44,16 @@ export function polyglotSqlSdkWorkersPlugin(options: PolyglotSqlSdkWorkersPlugin
     },
 
     transform(code, id) {
-      if (!isPolyglotSqlSdkEntry(id)) {
+      // Recent SDKs put the loader in a shared chunk rather than index.js.
+      // Leave facade/builder modules alone and transform the actual loader.
+      if (!isPolyglotSqlSdkModule(id) || !code.includes("__vite__initWasm")) {
         return null;
       }
       const wasmImport = workerBuild ? wasmModuleId : sdkWasm;
+      const transformed = transformPolyglotSqlSdk(code, wasmImport);
+      transformedWasm = true;
       return {
-        code: transformPolyglotSqlSdk(code, wasmImport),
+        code: transformed,
         map: null
       };
     },
@@ -48,6 +62,9 @@ export function polyglotSqlSdkWorkersPlugin(options: PolyglotSqlSdkWorkersPlugin
       if (!workerBuild || !config) {
         return;
       }
+      if (!transformedWasm) {
+        throw new Error("Unable to transform @polyglot-sql/sdk; no supported Wasm loader was found");
+      }
       const targetDir = workerOutputDir(config, options.dir);
       mkdirSync(targetDir, { recursive: true });
       copyFileSync(sdkWasm, join(targetDir, wasmFileName));
@@ -55,11 +72,9 @@ export function polyglotSqlSdkWorkersPlugin(options: PolyglotSqlSdkWorkersPlugin
   };
 }
 
-function isPolyglotSqlSdkEntry(id: string): boolean {
+function isPolyglotSqlSdkModule(id: string): boolean {
   const path = id.split("?")[0]?.replaceAll("\\", "/") ?? id;
-  return path === sdkEntry.replaceAll("\\", "/") ||
-    path.endsWith("/node_modules/@polyglot-sql/sdk/dist/index.js") ||
-    path.includes("/node_modules/.pnpm/@polyglot-sql+sdk@");
+  return path.startsWith(`${sdkDist.replaceAll("\\", "/")}/`) && path.endsWith(".js");
 }
 
 function transformPolyglotSqlSdk(code: string, wasmImport: string): string {
